@@ -14,12 +14,23 @@ Repository: <https://github.com/dni/taproot-lean>
 
 ## What is proven
 
-Unless stated otherwise, every result holds for **all** choices of the tagged hash functions. Hashes are modelled as arbitrary functions, so no property of SHA-256 is assumed. All results are *correctness* properties: when the parties follow the protocol, everything verifies. Security properties such as unforgeability are not covered (see [Limitations](#limitations)).
+Unless stated otherwise, every result holds for **all** choices of the tagged hash functions. Hashes are modelled as arbitrary functions, so no property of SHA-256 is assumed. Where a result needs a hash to be collision-free, that is an explicit hypothesis. Most results are *correctness* properties: when the parties follow the protocol, everything verifies. The *binding* and *extraction* results go further: they hold for arbitrary, possibly malicious, inputs. Unforgeability itself is not covered (see [Limitations](#limitations)).
 
 ### BIP340: Schnorr signatures — `Taproot/BIP340.lean`
 | Theorem | Statement |
 |---|---|
 | `verify_sign` | Every signature produced by `Sign` with secret key `sk` is accepted by `Verify` under `sk`'s public key. |
+
+`Taproot/BIP340Props.lean`:
+
+| Theorem | Statement |
+|---|---|
+| `verify_unique` | **Non-malleability**: for a given public key, message and `r`, at most one `s` is valid. |
+| `extract_secret` | **Special soundness**, the extractor behind Schnorr's security proof: any two valid signatures that share `r` but have different challenges reveal the secret key. |
+| `sign_nonce_reuse` | So a signer whose nonce repeats across two messages leaks its key. |
+| `batchVerify_of_valid` | BIP340 batch verification accepts every batch of valid signatures, for every choice of coefficients. |
+| `batchVerify_sound` | If one signature is invalid, then once the other coefficients are fixed, at most one value of its coefficient lets the batch pass. A random coefficient catches it except with probability `1/n`. |
+| `batchVerify_sound_single` | A single invalid signature with a nonzero coefficient (e.g. BIP340's fixed `a₁ = 1`) is always caught. |
 
 ### BIP341: Taproot — `Taproot/BIP341.lean`
 | Theorem | Statement |
@@ -28,6 +39,9 @@ Unless stated otherwise, every result holds for **all** choices of the tagged ha
 | `keyPath_verify` | A signature made with the tweaked secret key verifies under the output key (key-path spending). |
 | `computeRoot_of_mem` | Recomputing the Merkle root from any leaf and its path gives the script tree's root. |
 | `verifyScriptPath_of_mem` | Every leaf of the committed script tree passes BIP341's control-block check (script-path spending). |
+| `mem_of_computeRoot` | **Merkle binding**: with collision-free `TapLeaf`/`TapBranch` hashes, a leaf and path that recompute a tree's root are one of its leaves with its own path. |
+| `mem_of_verifyScriptPath` | **Only committed scripts can be spent**: with collision-free hashes (including `TapTweak`), any leaf passing the control-block check is a leaf of the committed tree. |
+| `verifyScriptPath_of_none` | A key-path-only output (no script tree) has no valid script-path spend. |
 
 ### BIP327: MuSig2 — `Taproot/MuSig2.lean`
 | Theorem | Statement |
@@ -38,14 +52,18 @@ Unless stated otherwise, every result holds for **all** choices of the tagged ha
 | `verify_honest` | MuSig2 correctness for honest signers. |
 | `outputKey_eq_applyTweak` | Applying the Taproot tweak as a MuSig2 x-only tweak gives exactly the BIP341 output key. |
 
-### Discreet Log Contracts — `Taproot/DLC.lean`, `Taproot/MuSig2.lean`
+### Discreet Log Contracts — `Taproot/DLC.lean`, `Taproot/DLCNumeric.lean`, `Taproot/MuSig2.lean`
 | Theorem | Statement |
 |---|---|
 | `anticipate_of_verify` | A valid oracle attestation `(r, s)` of outcome `m` satisfies `s·G = R + e·P`, the point anticipated at setup. |
 | `nonce_reuse_reveals_key` | An oracle that attests two outcomes with the same nonce reveals its secret key. |
+| `anticipate_ne` | Different outcomes have different anticipation points, unless their challenge hashes collide. |
+| `verify_adapt_wrong_outcome` | **Outcome binding**: the oracle's attestation of one outcome does not complete the adaptor signature of another outcome's CET. |
 | `verify_adapt` | Any Schnorr adaptor pre-signature that passed pre-verification (even a malicious signer's) completes to a valid BIP340 signature once the secret is known. |
 | `extract_of_verify` | Any valid completed signature reveals the adaptor secret, i.e. the oracle's attestation. |
 | `settle` | DLC settlement through a Taproot **script path** (2-of-2 tapscript leaf). |
+| `decomp_spec`, `decomp_unique` | **Numeric outcomes**: the digit-prefix decomposition of a payout interval `[lo, hi)` covers exactly the outcomes in the interval, each by exactly one prefix (one CET per outcome, never two). |
+| `numeric_settle` | When the oracle attests each digit of an outcome in the interval, the sum of its digit attestations completes the adaptor signature of the one CET covering that outcome. |
 | `settleKeyPath` | DLC settlement through the Taproot **key path**: the funding output's internal key is the MuSig2 aggregate of both parties, and completing their checked MuSig2 adaptor signature spends it. |
 
 ### BIP350: Bech32m — `Taproot/BIP350.lean`
@@ -57,6 +75,8 @@ Unless stated otherwise, every result holds for **all** choices of the tagged ha
 | `bech32_q_mutation` | **The Bech32 weakness that motivated BIP350**: in a valid Bech32 string ending in `p`, any number of `q`s can be inserted before the final `p`, or deleted, and the string stays valid. |
 | `bech32_q_insertion_undetected_iff` | For Bech32, inserting 1–89 `q`s before the last character goes undetected **if and only if** that character is `p`. |
 | `bech32m_q_insertion_detected`, `bech32m_q_deletion_detected` | **Bech32m fixes it**: inserting or deleting 1–89 `q`s before the last character (any character) always invalidates the checksum. |
+| `two_substitutions_detected`, `verifyChecksum_two_substitutions` | Changing any two data or checksum characters (up to 88 positions apart, which covers every valid string) is always detected. |
+| `burst_detected` | Any error confined to at most 6 consecutive characters is always detected. |
 
 `Taproot/Summary.lean` restates the main results for the concrete `secp256k1` curve and prints the axioms each one depends on.
 
@@ -86,16 +106,18 @@ The official test vectors run against the same definitions the theorems are abou
 |---|---|
 | BIP350 / Bech32m: all theorems and test vectors | Lean's standard axioms only (`propext`, `Classical.choice`, `Quot.sound`). Fully kernel-checked. |
 | BIP340/341, MuSig2, DLC on secp256k1 | Standard axioms plus **one** `native_decide` computation: `n·G = 0` (`Secp256k1.n_smul_G`). |
+| Generic results (batch verification, numeric DLC decomposition) | Standard axioms only. They hold for any curve satisfying the interface. |
 | BIP340 test vectors | Additionally use `native_decide` to run the vectors. |
 
 `native_decide` trusts Lean's compiler in addition to its kernel. Every other computation, including all primality certificates, is checked by the kernel.
 
 ## Limitations
 
-- **Correctness, not security.** These are not unforgeability or security proofs: they rely on no hardness assumption and say nothing about adversaries who don't follow the protocol. For example, nothing here proves that a counterparty can't complete a DLC transaction for an outcome the oracle didn't attest. The exceptions are the robustness results: `verify_adapt`, `extract_of_verify` and `verify_aggregate` hold for *any* inputs that pass the respective checks.
+- **No unforgeability proofs.** Nothing here relies on a hardness assumption such as discrete log, and there are no probabilistic reductions. For example, nothing proves that a counterparty can't complete a DLC transaction for an outcome the oracle didn't attest by some means other than the attestation. What *is* proven about adversarial inputs: the robustness results (`verify_adapt`, `extract_of_verify`, `verify_aggregate`), the building blocks of security proofs (non-malleability, special soundness, batch-verification soundness), and the binding results under explicit collision-freeness hypotheses (script-tree binding, outcome binding).
 - **Abstractions.** Hashes are arbitrary functions, transactions are reduced to the signed message, Bitcoin Script is not executed (the 2-of-2 leaf is modelled by what it checks), and byte encodings are left out except in the test-vector files. BIP340's range checks become types (`ZMod n`).
-- **MuSig2 details.** MuSig2 public keys are assumed to be multiples of `G` (every secp256k1 point is, but that isn't proven here), and the aggregate nonce is assumed non-infinite (the honest case). BIP327's byte-level details (`GetSecondKey`, the key-sorting conventions, nonce generation) are part of the abstract hash functions.
-- **Error detection.** For Bech32m, only single substitutions and the `q`-insertion/deletion pattern are proven. The BCH guarantee of detecting up to 4 substitutions is not.
+- **Group order.** Proving that secp256k1 has exactly `n` points (cofactor 1) needs point counting, which isn't done. So the MuSig2 results assume the public keys are multiples of `G`, and batch verification assumes `n·P = 0` for every point (`Curve.PrimeOrder`). Both hold for secp256k1.
+- **MuSig2 details.** The aggregate nonce is assumed non-infinite (the honest case). BIP327's byte-level details (`GetSecondKey`, the key-sorting conventions, nonce generation) are part of the abstract hash functions.
+- **Error detection.** For Bech32m, substitutions in up to 2 characters, bursts of up to 6 characters and the `q`-insertion/deletion pattern are proven. BIP173's full guarantee (any 4 substitutions) is not. Errors in the human-readable part are not covered.
 
 ## Building
 
@@ -118,8 +140,11 @@ Building the project itself takes a few minutes after the Mathlib cache is downl
 Taproot/
   Curve.lean          the curve interface the protocols are proven against
   BIP340.lean         Schnorr signatures
+  BIP340Props.lean    non-malleability, key extraction, batch verification
   BIP341.lean         Taproot: key tweaking, key path, script trees
-  DLC.lean            oracle attestations, Schnorr adaptor signatures, script-path settlement
+  DLC.lean            oracle attestations, Schnorr adaptor signatures, outcome binding,
+                      script-path settlement
+  DLCNumeric.lean     numeric outcomes: digit-prefix CET decomposition and settlement
   MuSig2.lean         BIP327 MuSig2, MuSig2 adaptor signatures, key-path DLC settlement
   Secp256k1.lean      the concrete curve, built on Mathlib's elliptic curves
   Pratt.lean          kernel-checked Pratt primality certificates

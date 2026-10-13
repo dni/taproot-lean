@@ -31,6 +31,8 @@ structure Curve (n : ℕ) (E X : Type*) [AddCommGroup E] where
   x_neg (P : E) : x (-P) = x P
   hasEvenY_neg (P : E) : P ≠ 0 → hasEvenY (-P) = !hasEvenY P
   liftX_x (P : E) : P ≠ 0 → hasEvenY P = true → liftX (x P) = some P
+  /-- `lift_x` only returns nonzero even-y points with the requested x-coordinate. -/
+  liftX_spec (r : X) (P : E) : liftX r = some P → P ≠ 0 ∧ hasEvenY P = true ∧ x P = r
 
 namespace Curve
 
@@ -83,6 +85,54 @@ theorem liftX_x_mulG {d : ZMod n} (hd : d ≠ 0) :
     C.liftX (C.x (C.mulG d)) = some (C.mulG (C.evenScalar d)) := by
   rw [← C.x_evenScalar d]
   exact C.liftX_x _ (C.mulG_ne_zero (C.evenScalar_ne_zero hd)) (C.hasEvenY_evenScalar hd)
+
+theorem mulG_injective : Function.Injective C.mulG := by
+  intro a b h
+  rw [← sub_eq_zero, ← C.mulG_eq_zero, map_sub, h, sub_self]
+
+omit [Fact n.Prime] in
+/-- Two nonzero points with the same x-coordinate and the same y-parity are equal. -/
+theorem eq_of_x_eq {P Q : E} (hP : P ≠ 0) (hQ : Q ≠ 0) (hx : C.x P = C.x Q)
+    (hy : C.hasEvenY P = C.hasEvenY Q) : P = Q := by
+  cases hPe : C.hasEvenY P
+  · have hQe : C.hasEvenY Q = false := hy ▸ hPe
+    have h1 := C.liftX_x (-P) (neg_ne_zero.mpr hP) (by rw [C.hasEvenY_neg _ hP, hPe]; rfl)
+    have h2 := C.liftX_x (-Q) (neg_ne_zero.mpr hQ) (by rw [C.hasEvenY_neg _ hQ, hQe]; rfl)
+    rw [C.x_neg, hx, ← C.x_neg, h2, Option.some.injEq] at h1
+    exact neg_injective h1.symm
+  · have h1 := C.liftX_x P hP hPe
+    rw [hx, C.liftX_x Q hQ (hy ▸ hPe), Option.some.injEq] at h1
+    exact h1.symm
+
+/-! ## Groups of prime order
+
+Some results (batch verification) need every point, not just the multiples of
+`G`, to satisfy `n·P = 0`. For secp256k1 this holds because the group has
+exactly `n` points (cofactor 1), but proving that needs point counting, which
+is not done here, so these results take it as a hypothesis. -/
+
+/-- Every point satisfies `n·P = 0` (for secp256k1: the group has prime order `n`). -/
+def PrimeOrder (n : ℕ) (E : Type*) [AddCommGroup E] : Prop := ∀ P : E, n • P = 0
+
+omit [Fact n.Prime] in
+theorem nsmul_mod {P : E} (hP : n • P = 0) (k : ℕ) : (k % n) • P = k • P := by
+  conv_rhs => rw [← Nat.mod_add_div k n, add_nsmul, mul_nsmul, hP, nsmul_zero, add_zero]
+
+theorem val_mul_smul {P : E} (hP : n • P = 0) (a b : ZMod n) :
+    (a * b).val • P = a.val • b.val • P := by
+  rw [ZMod.val_mul, nsmul_mod hP, ← mul_nsmul']
+
+theorem val_sub_smul {P : E} (hP : n • P = 0) (a b : ZMod n) :
+    (a - b).val • P = a.val • P - b.val • P := by
+  have h : ((a - b).val + b.val) % n = a.val % n := by
+    rw [← ZMod.val_add, sub_add_cancel, Nat.mod_eq_of_lt (ZMod.val_lt a)]
+  rw [eq_sub_iff_add_eq, ← add_nsmul, ← nsmul_mod hP, h, nsmul_mod hP]
+
+/-- In a group of prime order, a nonzero scalar kills only the zero point. -/
+theorem eq_zero_of_val_smul {P : E} (hP : n • P = 0) {k : ZMod n} (hk : k ≠ 0)
+    (h : k.val • P = 0) : P = 0 := by
+  have h1 : (k⁻¹ * k).val • P = 0 := by rw [val_mul_smul hP, h, nsmul_zero]
+  rwa [inv_mul_cancel₀ hk, ZMod.val_one, one_nsmul] at h1
 
 end Curve
 

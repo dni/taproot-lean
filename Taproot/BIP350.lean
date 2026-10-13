@@ -14,6 +14,8 @@ We implement the BIP's reference algorithms and prove:
 * `verify_createChecksum`: checksums made by the encoder always verify.
 * `not_both_valid`: no string is valid under both encodings.
 * `substitution_detected`: changing any one data/checksum symbol is detected.
+* `two_substitutions_detected`: so is changing any two (up to 88 apart).
+* `burst_detected`: so is any error confined to 6 consecutive symbols.
 * `bech32_q_mutation`: the Bech32 weakness that motivated BIP350. If a valid
   Bech32 string ends in `p`, inserting or deleting any number of `q`s just
   before that `p` keeps it valid.
@@ -517,5 +519,228 @@ theorem bech32_q_insertion_undetected_iff (hrp : List Char) (d : List ℕ) {v k 
       hk1 hk h
   · rintro rfl
     exact (bech32_q_mutation hrp d k).mp hvalid
+
+/-! ## Two substitutions
+
+BIP173 guarantees that up to 4 substitution errors are detected. We prove
+the case of 2: changing any two symbols of the data or checksum part (at most
+88 apart, which every address satisfies since strings are at most 90
+characters) is always detected. -/
+
+theorem step_xor_step (c c' : BitVec 32) (v v' : ℕ) :
+    step c v ^^^ step c' v' = shift (c ^^^ c') ^^^ (BitVec.ofNat 32 v ^^^ BitVec.ofNat 32 v') := by
+  unfold step
+  rw [shift_xor]
+  ac_rfl
+
+/-- Check that `shiftᵏ y` is at least 32 (not a single symbol) for `k = 1 … K`. -/
+def farFromSmall : ℕ → BitVec 32 → Bool
+  | 0, _ => true
+  | K + 1, y => decide (32 ≤ (shift y).toNat) && farFromSmall K (shift y)
+
+theorem farFromSmall_spec {K : ℕ} {y : BitVec 32} (h : farFromSmall K y = true)
+    {k : ℕ} (hk1 : 1 ≤ k) (hk : k ≤ K) : 32 ≤ (shift^[k] y).toNat := by
+  induction K generalizing y k with
+  | zero => omega
+  | succ K ih =>
+    simp only [farFromSmall, Bool.and_eq_true, decide_eq_true_eq] at h
+    obtain ⟨h1, h2⟩ := h
+    rcases Nat.eq_or_lt_of_le hk1 with rfl | hk1
+    · simpa using h1
+    · obtain ⟨j, rfl⟩ : ∃ j, k = j + 1 := ⟨k - 1, by omega⟩
+      rw [Function.iterate_succ_apply]
+      exact ih h2 (by omega) (by omega)
+
+/-- Kernel computation: shifting any nonzero symbol 1 to 88 times never gives a
+value below 32. -/
+theorem shifts_far_from_small :
+    (List.range 32).all (fun v => v == 0 || farFromSmall 88 (BitVec.ofNat 32 v)) = true := by
+  decide +kernel
+
+/-- **Two substitutions are detected**: changing symbol `a` to `a'` and, up to
+88 positions later, symbol `c` to `c'` (or leaving it) changes the checksum. -/
+theorem two_substitutions_detected (s : BitVec 32) (pre mid suf : List ℕ) {a a' c c' : ℕ}
+    (ha : a < 32) (ha' : a' < 32) (hc : c < 32) (hc' : c' < 32) (haa : a ≠ a')
+    (hmid : mid.length ≤ 87) :
+    polymodFrom s (pre ++ a :: mid ++ c :: suf) ≠
+      polymodFrom s (pre ++ a' :: mid ++ c' :: suf) := by
+  intro h
+  set t := polymodFrom s pre
+  set D := BitVec.ofNat 32 a ^^^ BitVec.ofNat 32 a'
+  set B := BitVec.ofNat 32 c ^^^ BitVec.ofNat 32 c'
+  -- The state difference after `a :: mid` is `shift^|mid| D`.
+  have hA : polymodFrom t (a :: mid) ^^^ polymodFrom t (a' :: mid) = shift^[mid.length] D := by
+    have := polymodFrom_xor (step t a) (step t a') mid
+    rw [show step t a ^^^ step t a' = D by unfold step; exact xor_xor_cancel_left _ _ _] at this
+    exact this
+  -- After `c`/`c'` it is `shift^(|mid|+1) D ^ B`, and `suf` only shifts it further.
+  have hfin := polymodFrom_xor (step (polymodFrom t (a :: mid)) c)
+    (step (polymodFrom t (a' :: mid)) c') suf
+  rw [step_xor_step, hA, ← Function.iterate_succ_apply' shift] at hfin
+  have hl : ∀ x y : ℕ, polymodFrom s (pre ++ x :: mid ++ y :: suf) =
+      polymodFrom (step (polymodFrom t (x :: mid)) y) suf := by
+    intro x y
+    rw [polymodFrom_append, polymodFrom_append]; rfl
+  rw [hl, hl] at h
+  rw [h, xorSelf] at hfin
+  have hlt : (shift^[mid.length + 1] D ^^^ B) >>> 30 = 0 := by
+    rw [ushr_eq_zero_iff, BitVec.toNat_xor]
+    have h1 := (ushr_eq_zero_iff _ 30).mp
+      (show shift^[mid.length + 1] D >>> 30 = 0 by
+        rw [Function.iterate_succ_apply']; exact shift_lt _)
+    have h2 := (ushr_eq_zero_iff _ 30).mp (ofNat_xor_lt hc hc')
+    exact Nat.xor_lt_two_pow h1 h2
+  have h0 := iterate_shift_eq_zero hlt hfin.symm
+  rw [xor_eq_iff, zeroXor] at h0
+  -- So `shift^(|mid|+1) D = B < 32`, contradicting the kernel check.
+  have hBlt : B.toNat < 32 := by
+    rw [BitVec.toNat_xor, BitVec.toNat_ofNat, BitVec.toNat_ofNat]
+    exact Nat.xor_lt_two_pow (n := 5) (by omega) (by omega)
+  have hDlt : D.toNat < 32 := by
+    rw [BitVec.toNat_xor, BitVec.toNat_ofNat, BitVec.toNat_ofNat]
+    exact Nat.xor_lt_two_pow (n := 5) (by omega) (by omega)
+  have hD0 : D.toNat ≠ 0 := by
+    intro hz
+    exact ofNat_xor_ne_zero ha ha' haa (by rw [← BitVec.toNat_inj]; exact hz)
+  have hcheck := shifts_far_from_small
+  rw [List.all_eq_true] at hcheck
+  have := hcheck D.toNat (List.mem_range.mpr hDlt)
+  simp only [BitVec.ofNat_toNat, BitVec.setWidth_eq, Bool.or_eq_true, beq_iff_eq] at this
+  replace this := this.resolve_left hD0
+  have := farFromSmall_spec this (k := mid.length + 1) (by omega) (by omega)
+  rw [h0] at this
+  omega
+
+/-- Two substitutions in a valid address checksum make it invalid. -/
+theorem verifyChecksum_two_substitutions (enc : Encoding) (hrp : List Char)
+    (pre mid suf : List ℕ) {a a' c c' : ℕ}
+    (ha : a < 32) (ha' : a' < 32) (hc : c < 32) (hc' : c' < 32) (haa : a ≠ a')
+    (hmid : mid.length ≤ 87)
+    (hvalid : verifyChecksum enc hrp (pre ++ a :: mid ++ c :: suf) = true) :
+    verifyChecksum enc hrp (pre ++ a' :: mid ++ c' :: suf) = false := by
+  simp only [verifyChecksum, beq_iff_eq, beq_eq_false_iff_ne, polymod] at hvalid ⊢
+  have e : ∀ x y : ℕ, hrpExpand hrp ++ (pre ++ x :: mid ++ y :: suf) =
+      (hrpExpand hrp ++ pre) ++ x :: mid ++ y :: suf := by intros; simp
+  rw [e] at hvalid ⊢
+  rw [← hvalid]
+  exact (two_substitutions_detected 1 _ mid suf ha ha' hc hc' haa hmid).symm
+
+/-! ## Burst errors
+
+Any error confined to at most 6 consecutive symbols (one checksum's worth) is
+detected: the checksum is a cyclic code whose generator has degree 6. -/
+
+theorem nat_xor_eq_zero {a b : ℕ} (h : a ^^^ b = 0) : a = b := by
+  apply Nat.eq_of_testBit_eq
+  intro i
+  have := congrArg (fun x => x.testBit i) h
+  simp only [Nat.testBit_xor, Nat.zero_testBit] at this
+  revert this
+  cases a.testBit i <;> cases b.testBit i <;> simp
+
+/-- `polymod` is linear: running two inputs and xoring the results is running
+the xor of the inputs from the xor of the start states. -/
+theorem polymodFrom_xor_inputs (s s' : BitVec 32) (us vs : List ℕ) (hlen : us.length = vs.length) :
+    polymodFrom s us ^^^ polymodFrom s' vs =
+      polymodFrom (s ^^^ s') (List.zipWith (· ^^^ ·) us vs) := by
+  induction us generalizing vs s s' with
+  | nil =>
+    cases vs with
+    | nil => rfl
+    | cons => simp at hlen
+  | cons u us ih =>
+    cases vs with
+    | nil => simp at hlen
+    | cons v vs =>
+      simp only [List.length_cons, Nat.add_right_cancel_iff] at hlen
+      simp only [polymodFrom, List.foldl_cons, List.zipWith_cons_cons] at ih ⊢
+      rw [ih _ _ _ hlen, step_xor_step, step, BitVec.ofNat_xor]
+
+/-- Starting from `c`, feeding small symbols is base-32 accumulation, as long
+as nothing overflows 30 bits. -/
+theorem toNat_polymodFrom_small (w : List ℕ) (hw : ∀ v ∈ w, v < 32) (c : BitVec 32)
+    (hc : (c.toNat + 1) * 32 ^ w.length ≤ 2 ^ 30) :
+    (polymodFrom c w).toNat = w.foldl (fun acc v => acc * 32 + v) c.toNat ∧
+      w.foldl (fun acc v => acc * 32 + v) c.toNat < (c.toNat + 1) * 32 ^ w.length := by
+  induction w generalizing c with
+  | nil => simp [polymodFrom]
+  | cons v w ih =>
+    have hv := hw v (List.mem_cons_self ..)
+    simp only [List.length_cons] at hc
+    have h32 : 32 ≤ 32 ^ (w.length + 1) := Nat.le_self_pow (by omega) 32
+    have hc25 : c.toNat < 2 ^ 25 := by
+      have := Nat.mul_le_mul_left (c.toNat + 1) h32
+      omega
+    have hstep := toNat_step_small hc25 hv
+    have hbound : (c.toNat * 32 + v + 1) * 32 ^ w.length ≤ (c.toNat + 1) * 32 ^ (w.length + 1) := by
+      calc (c.toNat * 32 + v + 1) * 32 ^ w.length ≤ ((c.toNat + 1) * 32) * 32 ^ w.length :=
+            Nat.mul_le_mul_right _ (by omega)
+        _ = (c.toNat + 1) * 32 ^ (w.length + 1) := by ring
+    have ih' := ih (fun x hx => hw x (List.mem_cons_of_mem _ hx)) (step c v)
+      (by rw [hstep]; omega)
+    simp only [polymodFrom, List.foldl_cons, List.length_cons] at ih' ⊢
+    rw [hstep] at ih'
+    exact ⟨ih'.1, by omega⟩
+
+theorem foldl_ne_zero (w : List ℕ) (acc : ℕ) (h : acc ≠ 0 ∨ ∃ v ∈ w, v ≠ 0) :
+    w.foldl (fun acc v => acc * 32 + v) acc ≠ 0 := by
+  induction w generalizing acc with
+  | nil => simpa using h
+  | cons v w ih =>
+    apply ih
+    change acc * 32 + v ≠ 0 ∨ _
+    by_cases hv : v = 0
+    · rcases h with h | ⟨x, hx, hx0⟩
+      · left; omega
+      · rcases List.mem_cons.mp hx with rfl | hx
+        · exact absurd hv hx0
+        · exact Or.inr ⟨x, hx, hx0⟩
+    · left; omega
+
+theorem exists_ne_zero_of_ne {e₁ e₂ : List ℕ} (hlen : e₁.length = e₂.length) (hne : e₁ ≠ e₂) :
+    ∃ v ∈ List.zipWith (· ^^^ ·) e₁ e₂, v ≠ 0 := by
+  induction e₁ generalizing e₂ with
+  | nil => cases e₂ <;> simp_all
+  | cons a e₁ ih =>
+    cases e₂ with
+    | nil => simp at hlen
+    | cons b e₂ =>
+      simp only [List.length_cons, Nat.add_right_cancel_iff] at hlen
+      simp only [List.zipWith_cons_cons, List.mem_cons, exists_eq_or_imp]
+      by_cases hab : a = b
+      · subst hab
+        exact Or.inr (ih hlen (fun h => hne (by rw [h])))
+      · exact Or.inl (fun h => hab (nat_xor_eq_zero h))
+
+/-- **Burst errors are detected**: replacing a block of at most 6 consecutive
+symbols by a different block of the same length changes the checksum. -/
+theorem burst_detected (s : BitVec 32) (pre suf e₁ e₂ : List ℕ)
+    (hlen : e₁.length = e₂.length) (h6 : e₁.length ≤ 6)
+    (h₁ : ∀ v ∈ e₁, v < 32) (h₂ : ∀ v ∈ e₂, v < 32) (hne : e₁ ≠ e₂) :
+    polymodFrom s (pre ++ e₁ ++ suf) ≠ polymodFrom s (pre ++ e₂ ++ suf) := by
+  intro h
+  set t := polymodFrom s pre
+  set w := List.zipWith (· ^^^ ·) e₁ e₂
+  rw [polymodFrom_append, polymodFrom_append, polymodFrom_append, polymodFrom_append] at h
+  have key := polymodFrom_xor (polymodFrom t e₁) (polymodFrom t e₂) suf
+  rw [h, xorSelf, polymodFrom_xor_inputs _ _ _ _ hlen, xorSelf] at key
+  -- The difference block `w` has small symbols, length ≤ 6 and a nonzero symbol.
+  have hw : ∀ v ∈ w, v < 32 := by
+    intro v hv
+    obtain ⟨i, hi, rfl⟩ := List.getElem_of_mem hv
+    simp only [w, List.getElem_zipWith]
+    exact Nat.xor_lt_two_pow (n := 5) (h₁ _ (List.getElem_mem _)) (h₂ _ (List.getElem_mem _))
+  have hwlen : w.length = e₁.length := by simp [w, hlen]
+  have h32 : 32 ^ w.length ≤ 2 ^ 30 := by
+    rw [hwlen]; exact (Nat.pow_le_pow_right (by omega) h6).trans (by norm_num)
+  have hsmall := toNat_polymodFrom_small w hw 0 (by rw [toNat_zero32, zero_add, one_mul]; exact h32)
+  rw [toNat_zero32, zero_add, one_mul] at hsmall
+  have hnz := foldl_ne_zero w 0 (Or.inr (exists_ne_zero_of_ne hlen hne))
+  have hlt : polymodFrom 0 w >>> 30 = 0 := by
+    rw [ushr_eq_zero_iff, hsmall.1]
+    exact hsmall.2.trans_le h32
+  have h0 := iterate_shift_eq_zero (k := suf.length) hlt key.symm
+  rw [← BitVec.toNat_inj, hsmall.1, toNat_zero32] at h0
+  exact hnz h0
 
 end Bech32

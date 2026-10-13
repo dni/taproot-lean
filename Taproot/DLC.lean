@@ -230,6 +230,45 @@ theorem extract_of_verify {pk : X} {T : E} {m : M} {ps : PreSig n E} {sig : X ×
       rw [C.x_neg, ← hNx, hN, Option.some.injEq] at hR
       rw [map_sub, hs', sub_eq_iff_eq_add.mp hR]; abel
 
+/-! ## Outcome binding -/
+
+omit [DecidableEq E] [DecidableEq X] in
+/-- **Different outcomes have different anticipation points** (for an oracle
+key with a secret key, and outcomes whose challenges differ, i.e. barring a
+collision of the challenge hash). -/
+theorem anticipate_ne {osk : ZMod n} {opk r : X} {m m' : M} {S S' : E}
+    (hopk : pubkey C osk = some opk)
+    (hS : anticipate C challenge opk r m = some S) (hS' : anticipate C challenge opk r m' = some S')
+    (hne : challenge r opk m ≠ challenge r opk m') : S ≠ S' := by
+  unfold pubkey at hopk
+  split_ifs at hopk with hsk
+  cases hopk
+  rcases hR : C.liftX r with _ | R
+  · simp [anticipate, hR] at hS
+  simp only [anticipate, C.liftX_x_mulG hsk, hR, Option.some.injEq] at hS hS'
+  subst hS hS'
+  intro h
+  rw [add_right_inj, C.val_smul_mulG, C.val_smul_mulG] at h
+  exact hne (mul_right_cancel₀ (C.evenScalar_ne_zero hsk) (C.mulG_injective h))
+
+/-- **The attestation of one outcome does not complete another outcome's CET**:
+if a pre-signature is locked to the anticipation point of outcome `m`, and
+the oracle attests a different outcome `m'` (with a different challenge), then
+completing the pre-signature with that attestation does not give a valid
+signature. -/
+theorem verify_adapt_wrong_outcome {osk : ZMod n} {opk r pk : X} {m m' msg : M} {S : E}
+    {ps : PreSig n E} {s : ZMod n}
+    (hopk : pubkey C osk = some opk) (hS : anticipate C challenge opk r m = some S)
+    (hpre : preVerify C challenge pk S msg ps = true)
+    (hatt : verify C challenge opk m' (r, s) = true)
+    (hne : challenge r opk m ≠ challenge r opk m') :
+    verify C challenge pk msg (adapt C ps s) = false := by
+  by_contra hv
+  rw [Bool.not_eq_false] at hv
+  have ht := extract_of_verify C challenge hpre hv rfl
+  rw [extract_adapt] at ht
+  exact anticipate_ne C challenge hopk hS (anticipate_of_verify C challenge hatt) hne ht.symm
+
 /-! ## Settlement through a Taproot script path -/
 
 /-- The DLC funding leaf: a 2-of-2 tapscript between Alice and Bob

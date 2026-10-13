@@ -164,6 +164,120 @@ theorem verifyScriptPath_of_mem (tweak : X → Option T → ZMod n) (t : ScriptT
     obtain ⟨rfl, rfl⟩ := Prod.mk.inj (Option.some.inj hQ)
     simp [h0]
 
+/-! ### Binding: only committed leaves can be spent
+
+The converse of `verifyScriptPath_of_mem`, assuming the hashes have no
+collisions: `hash_TapLeaf` is injective, `hash_TapBranch` is injective on
+pairs, the two never collide with each other (they use different tags), and
+`hash_TapTweak(p ‖ ·)` is injective. Contrapositively, spending a script that
+is not in the committed tree requires finding a hash collision. -/
+
+section Binding
+
+variable {leafHash branch}
+
+theorem tapBranch_inj (hbranch : ∀ a b c d, branch a b = branch c d → a = c ∧ b = d)
+    {a b c d : T} (h : tapBranch branch a b = tapBranch branch c d) :
+    (a = c ∧ b = d) ∨ (a = d ∧ b = c) := by
+  unfold tapBranch at h
+  split_ifs at h
+  · exact Or.inl (hbranch _ _ _ _ h)
+  · obtain ⟨h1, h2⟩ := hbranch _ _ _ _ h
+    exact Or.inr ⟨h1, h2⟩
+  · obtain ⟨h1, h2⟩ := hbranch _ _ _ _ h
+    exact Or.inr ⟨h2, h1⟩
+  · obtain ⟨h1, h2⟩ := hbranch _ _ _ _ h
+    exact Or.inl ⟨h2, h1⟩
+
+theorem computeRoot_concat (l : L) (path : List T) (b : T) :
+    computeRoot leafHash branch l (path ++ [b]) =
+      tapBranch branch (computeRoot leafHash branch l path) b := by
+  simp [computeRoot, List.foldl_append]
+
+/-- **Merkle binding**: with collision-free hashes, a leaf and path that
+recompute the root of `t` are exactly one of `t`'s leaves with its path. -/
+theorem mem_of_computeRoot (hleaf : Function.Injective leafHash)
+    (hbranch : ∀ a b c d, branch a b = branch c d → a = c ∧ b = d)
+    (hsep : ∀ l a b, leafHash l ≠ branch a b) (t : ScriptTree L) {l : L} {path : List T}
+    (h : computeRoot leafHash branch l path = t.root leafHash branch) :
+    (l, path) ∈ t.paths leafHash branch := by
+  have hsep' (l : L) (a b : T) : leafHash l ≠ tapBranch branch a b := by
+    unfold tapBranch; split_ifs <;> exact hsep _ _ _
+  induction t generalizing path with
+  | leaf l' =>
+    rcases path.eq_nil_or_concat' with rfl | ⟨p, b, rfl⟩
+    · simp only [computeRoot, List.foldl_nil, ScriptTree.root] at h
+      simp [ScriptTree.paths, hleaf h]
+    · rw [computeRoot_concat, ScriptTree.root] at h
+      exact absurd h.symm (hsep' _ _ _)
+  | node a b iha ihb =>
+    rcases path.eq_nil_or_concat' with rfl | ⟨p, c, rfl⟩
+    · simp only [computeRoot, List.foldl_nil, ScriptTree.root] at h
+      exact absurd h (hsep' _ _ _)
+    · rw [computeRoot_concat, ScriptTree.root] at h
+      simp only [ScriptTree.paths, List.mem_append, List.mem_map, Prod.mk.injEq]
+      rcases tapBranch_inj hbranch h with ⟨h1, rfl⟩ | ⟨h1, rfl⟩
+      · exact Or.inl ⟨(l, p), iha h1, rfl, rfl⟩
+      · exact Or.inr ⟨(l, p), ihb h1, rfl, rfl⟩
+
+omit [DecidableEq E] [DecidableEq X] in
+/-- If the recomputed output key matches (same x and parity), the tweaks agree. -/
+theorem tweak_eq_of_match {P : E} {t t' : ZMod n}
+    (h0 : P + t.val • C.G ≠ 0) (h0' : P + t'.val • C.G ≠ 0)
+    (hx : C.x (P + t.val • C.G) = C.x (P + t'.val • C.G))
+    (hy : C.hasEvenY (P + t.val • C.G) = C.hasEvenY (P + t'.val • C.G)) : t = t' := by
+  have := C.eq_of_x_eq h0 h0' hx hy
+  rw [add_right_inj, ← mulG_eq_val_smul, ← mulG_eq_val_smul] at this
+  exact C.mulG_injective this
+
+/-- **Script-path binding**: if `q` is the output key committing to `root`
+(or to no scripts, `root = none`), and `hash_TapTweak(p ‖ ·)` is injective,
+then any leaf and path passing the control-block check recompute exactly
+`root`. -/
+theorem computeRoot_of_verifyScriptPath (tweak : X → Option T → ZMod n) {p q : X}
+    (htweak : Function.Injective (tweak p)) {root : Option T} {parity : Bool}
+    {l : L} {path : List T}
+    (hQ : outputKey C tweak p root = some (q, parity))
+    (hv : verifyScriptPath C leafHash branch tweak q parity p l path = true) :
+    root = some (computeRoot leafHash branch l path) := by
+  unfold outputKey at hQ
+  unfold verifyScriptPath at hv
+  split at hQ
+  · cases hQ
+  · rename_i P hP
+    rw [hP] at hv
+    dsimp only at hQ hv
+    split_ifs at hQ with h0
+    obtain ⟨rfl, rfl⟩ := Prod.mk.inj (Option.some.inj hQ)
+    simp only [Bool.and_eq_true, decide_eq_true_eq, beq_iff_eq] at hv
+    obtain ⟨⟨h0', hx⟩, hy⟩ := hv
+    exact htweak (tweak_eq_of_match C h0 h0' hx.symm hy.symm)
+
+/-- **Only committed scripts can be spent**: with collision-free hashes, a
+leaf passing the control-block check for an output committing to script tree
+`t` is a leaf of `t`, with its own Merkle path. -/
+theorem mem_of_verifyScriptPath (tweak : X → Option T → ZMod n) (t : ScriptTree L) {p q : X}
+    (htweak : Function.Injective (tweak p)) (hleaf : Function.Injective leafHash)
+    (hbranch : ∀ a b c d, branch a b = branch c d → a = c ∧ b = d)
+    (hsep : ∀ l a b, leafHash l ≠ branch a b) {parity : Bool} {l : L} {path : List T}
+    (hQ : outputKey C tweak p (some (t.root leafHash branch)) = some (q, parity))
+    (hv : verifyScriptPath C leafHash branch tweak q parity p l path = true) :
+    (l, path) ∈ t.paths leafHash branch :=
+  mem_of_computeRoot hleaf hbranch hsep t
+    (Option.some.inj (computeRoot_of_verifyScriptPath C tweak htweak hQ hv)).symm
+
+/-- **Key-path-only outputs have no script path**: if the output key commits
+to no script tree, no leaf passes the control-block check. -/
+theorem verifyScriptPath_of_none (tweak : X → Option T → ZMod n) {p q : X}
+    (htweak : Function.Injective (tweak p)) {parity : Bool} {l : L} {path : List T}
+    (hQ : outputKey C tweak p none = some (q, parity)) :
+    verifyScriptPath C leafHash branch tweak q parity p l path = false := by
+  by_contra hv
+  rw [Bool.not_eq_false] at hv
+  cases computeRoot_of_verifyScriptPath C tweak htweak hQ hv
+
+end Binding
+
 end ScriptPath
 
 end Taproot.BIP341

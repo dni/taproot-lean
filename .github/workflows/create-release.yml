@@ -11,6 +11,8 @@ on:
 jobs:
   lean-release-tag:
     name: Add Lean release tag
+    # The first push to a branch has no previous commit to diff against.
+    if: github.event.before != '0000000000000000000000000000000000000000'
     runs-on: ubuntu-latest
     permissions:
       contents: write

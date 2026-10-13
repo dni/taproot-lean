@@ -2,9 +2,11 @@ import Taproot.Pratt
 import Taproot.Primes
 import Taproot.Curve
 import Taproot.BIP340
+import Taproot.BIP340Props
 import Taproot.BIP341
 import Taproot.Secp256k1
 import Taproot.DLC
+import Taproot.DLCNumeric
 import Taproot.MuSig2
 import Taproot.BIP350
 import Taproot.BIP350Vectors

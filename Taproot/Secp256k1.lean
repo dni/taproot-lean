@@ -191,6 +191,19 @@ theorem liftX_x (P : Point) (hP : P ≠ 0) (heven : hasEvenY P = true) :
     simp only [hasEvenY, beq_iff_eq] at heven
     exact liftX_some h heven
 
+theorem liftX_spec (r : F) (P : Point) (h : liftX r = some P) :
+    P ≠ 0 ∧ hasEvenY P = true ∧ xCoord P = r := by
+  unfold liftX at h
+  split_ifs at h with hc
+  cases h
+  refine ⟨WeierstrassCurve.Affine.Point.some_ne_zero _, ?_, rfl⟩
+  have hy0 := y_ne_zero hc
+  simp only [hasEvenY, evenRoot, beq_iff_eq]
+  split_ifs with he
+  · exact he
+  · have := val_neg_parity hy0
+    omega
+
 /-- **secp256k1**, packaged as the curve interface BIP340/341 are proven against. -/
 def secp256k1 : Curve n Point F where
   G := G
@@ -202,5 +215,6 @@ def secp256k1 : Curve n Point F where
   x_neg := x_neg
   hasEvenY_neg := hasEvenY_neg
   liftX_x := liftX_x
+  liftX_spec := liftX_spec
 
 end Taproot.Secp256k1

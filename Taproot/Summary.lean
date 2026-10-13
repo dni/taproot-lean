@@ -1,4 +1,6 @@
 import Taproot.MuSig2
+import Taproot.BIP340Props
+import Taproot.DLCNumeric
 import Taproot.BIP350
 import Taproot.BIP340Vectors
 import Taproot.BIP350Vectors
@@ -134,6 +136,45 @@ theorem secp256k1_dlc_settle_keyPath {T' : Type*} (aggCoef : List Point → Poin
   settleKeyPath secp256k1 aggCoef nonceCoef challenge tweak root alice bob hA hB h₀ htw hS hR
     hpartA hpartB hatt
 
+/-- BIP340 non-malleability: a public key, message and `r` determine `s`. -/
+theorem secp256k1_schnorr_unique {pk : F} {m : M} {r : F} {s s' : ZMod n}
+    (h : verify secp256k1 challenge pk m (r, s) = true)
+    (h' : verify secp256k1 challenge pk m (r, s') = true) : s = s' :=
+  verify_unique secp256k1 challenge h h'
+
+/-- BIP340 special soundness: two valid signatures sharing `r` on different
+challenges reveal the secret key. -/
+theorem secp256k1_schnorr_extract {sk : ZMod n} {pk : F} {m₁ m₂ : M} {r : F} {s₁ s₂ : ZMod n}
+    (hpk : pubkey secp256k1 sk = some pk)
+    (h₁ : verify secp256k1 challenge pk m₁ (r, s₁) = true)
+    (h₂ : verify secp256k1 challenge pk m₂ (r, s₂) = true)
+    (he : challenge r pk m₁ ≠ challenge r pk m₂) :
+    (s₁ - s₂) / (challenge r pk m₁ - challenge r pk m₂) = secp256k1.evenScalar sk :=
+  (extract_secret secp256k1 challenge hpk h₁ h₂ he).1
+
+/-- BIP341 script-path binding: with collision-free hashes, only leaves of the
+committed script tree pass the control-block check. -/
+theorem secp256k1_taproot_scriptPath_binding {L T : Type*} [LinearOrder T] (leafHash : L → T)
+    (branch : T → T → T) (tweak : F → Option T → ZMod n) (t : ScriptTree L) {p q : F}
+    (htweak : Function.Injective (tweak p)) (hleaf : Function.Injective leafHash)
+    (hbranch : ∀ a b c d, branch a b = branch c d → a = c ∧ b = d)
+    (hsep : ∀ l a b, leafHash l ≠ branch a b) {parity : Bool} {l : L} {path : List T}
+    (hQ : outputKey secp256k1 tweak p (some (t.root leafHash branch)) = some (q, parity))
+    (hv : verifyScriptPath secp256k1 leafHash branch tweak q parity p l path = true) :
+    (l, path) ∈ t.paths leafHash branch :=
+  mem_of_verifyScriptPath secp256k1 tweak t htweak hleaf hbranch hsep hQ hv
+
+/-- DLC outcome binding: the attestation of one outcome does not complete the
+CET adaptor signature of another. -/
+theorem secp256k1_dlc_wrong_outcome {osk : ZMod n} {opk r pk : F} {m m' msg : M} {S : Point}
+    {ps : PreSig n Point} {s : ZMod n}
+    (hopk : pubkey secp256k1 osk = some opk) (hS : anticipate secp256k1 challenge opk r m = some S)
+    (hpre : preVerify secp256k1 challenge pk S msg ps = true)
+    (hatt : verify secp256k1 challenge opk m' (r, s) = true)
+    (hne : challenge r opk m ≠ challenge r opk m') :
+    verify secp256k1 challenge pk msg (adapt secp256k1 ps s) = false :=
+  verify_adapt_wrong_outcome secp256k1 challenge hopk hS hpre hatt hne
+
 end Taproot
 
 /-! ## What the proofs rely on -/
@@ -146,10 +187,18 @@ end Taproot
 #print axioms Taproot.secp256k1_oracle_nonce_reuse
 #print axioms Taproot.secp256k1_musig2_sound
 #print axioms Taproot.secp256k1_dlc_settle_keyPath
+#print axioms Taproot.secp256k1_schnorr_unique
+#print axioms Taproot.secp256k1_schnorr_extract
+#print axioms Taproot.secp256k1_taproot_scriptPath_binding
+#print axioms Taproot.secp256k1_dlc_wrong_outcome
+#print axioms Taproot.DLC.Numeric.numeric_settle
+#print axioms Taproot.BIP340.batchVerify_sound
 #print axioms Bech32.verify_createChecksum
 #print axioms Bech32.verifyChecksum_substitution
 #print axioms Bech32.bech32m_q_insertion_detected
 #print axioms Bech32.bech32_q_insertion_undetected_iff
+#print axioms Bech32.verifyChecksum_two_substitutions
+#print axioms Bech32.burst_detected
 #print axioms Bech32.validSegwit_ok
 #print axioms Taproot.BIP340Vectors.vectors_verify
 #print axioms Taproot.BIP340Vectors.vectors_sign
