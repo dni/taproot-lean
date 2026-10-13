@@ -198,25 +198,30 @@ instance : Nonempty (Stmt C) := ⟨⟨C.mulG 0, 0, rfl⟩⟩
 
 noncomputable instance : SampleableType (Stmt C) := SampleableType.ofFintype _
 
+variable [DecidableEq X]
+
 /-- The simulator: pick the challenge `e` and a response `s` first, then solve
 the verification equation for the nonce point `R = s·G - e·P`. -/
-noncomputable def simTranscript (P : Stmt C) : ProbComp (X × ZMod n × ZMod n) := do
+noncomputable def simTranscript (P : Stmt C) : ProbComp ((X × X) × ZMod n × ZMod n) := do
   let e ← $ᵗ (ZMod n)
   let s ← $ᵗ (Good C P e)
-  return (C.x (C.mulG s.1 - e.val • P.1), e, s.1)
+  return ((C.x (C.mulG s.1 - e.val • P.1), C.x P.1), e, s.1)
 
 /-- The BIP340 Σ-protocol: statement `P`, witness `d` with `d·G = P`. The
-prover picks a uniform nonzero nonce `k'`, commits to `r = x(k'·G)`, and
-answers the challenge `e` with `s = k + e·d`, where `k` is `k'` normalized so
-that `k·G` has an even y (as in BIP340 `Sign`). -/
+prover picks a uniform nonzero nonce `k'`, commits to `(r, p)` with
+`r = x(k'·G)` and `p = x(P)` the public key, and answers the challenge `e`
+with `s = k + e·d`, where `k` is `k'` normalized so that `k·G` has an even y
+(as in BIP340 `Sign`). Putting `p` into the commitment makes the Fiat-Shamir
+hash input `(m, (r, p))`: exactly BIP340's challenge inputs `r ‖ p ‖ m`. -/
 noncomputable def sigma :
-    SigmaProtocol (Stmt C) (ZMod n) X (ZMod n) (ZMod n) (ZMod n)
+    SigmaProtocol (Stmt C) (ZMod n) (X × X) (ZMod n) (ZMod n) (ZMod n)
       (fun P w => decide (C.mulG w = P.1)) where
-  commit _ _ := do
+  commit P _ := do
     let k ← $ᵗ (NonzeroScalar n)
-    return (C.x (C.mulG k.1), C.evenScalar k.1)
+    return ((C.x (C.mulG k.1), C.x P.1), C.evenScalar k.1)
   respond _ w k e := pure (k + e * w)
-  verify P r e s := decide (C.liftX r = some (C.mulG s - e.val • P.1))
+  verify P c e s :=
+    decide (c.2 = C.x P.1) && decide (C.liftX c.1 = some (C.mulG s - e.val • P.1))
   sim P := Prod.fst <$> simTranscript C P
   extract e₁ s₁ e₂ s₂ := pure ((s₁ - s₂) / (e₁ - e₂))
 
@@ -233,21 +238,34 @@ noncomputable def keyGen :
     obtain ⟨k, -, rfl, rfl⟩ := h
     simp
 
-/-- The Σ-protocol's check is BIP340's `Verify` with challenge `e`, for even-y keys. -/
-theorem sigma_verify_eq_verify [DecidableEq X] {M : Type} {P : E} (hP0 : P ≠ 0)
+/-- The Σ-protocol's check is BIP340's `Verify` with challenge `e`, for even-y
+keys, when the commitment carries the right public key `x(P)`. So a signature
+`((r, x(P)), s)` of this scheme is valid iff the BIP340 signature `(r, s)` is,
+with challenge `e = H(m, (r, x(P)))`: the two signature formats differ only
+by the (checked) public key. -/
+theorem sigma_verify_eq_verify {M : Type} {P : E} (hP0 : P ≠ 0)
     (hPe : C.hasEvenY P = true) (hP : P ∈ Set.range C.mulG) (r : X) (e s : ZMod n) (m : M) :
-    (sigma C).verify ⟨P, hP⟩ r e s =
+    (sigma C).verify ⟨P, hP⟩ (r, C.x P) e s =
       BIP340.verify C (fun _ _ _ => e) (C.x P) m (r, s) := by
   have hlift := C.liftX_x P hP0 hPe
   rw [Bool.eq_iff_iff, BIP340.verify_eq_true_iff]
-  simp only [sigma, decide_eq_true_eq, hlift, Option.some.injEq, exists_eq_left']
+  simp only [sigma, decide_eq_true_eq, hlift, Option.some.injEq, exists_eq_left',
+    Bool.and_eq_true, true_and]
+
+/-- A commitment carrying any other public key is rejected. -/
+theorem sigma_verify_wrong_key {P : Stmt C} {r p : X} (hp : p ≠ C.x P.1) (e s : ZMod n) :
+    (sigma C).verify P (r, p) e s = false := by
+  simp [sigma, hp]
 
 /-- **Special soundness**: two accepting transcripts with the same commitment
 and different challenges reveal a secret key. -/
 theorem sigma_speciallySound : (sigma C).SpeciallySound := by
-  rintro ⟨P, k, rfl⟩ r e₁ e₂ s₁ s₂ hne h₁ h₂ w hw
-  simp only [sigma, support_pure, Set.mem_singleton_iff, decide_eq_true_eq] at h₁ h₂ hw ⊢
+  rintro ⟨P, k, rfl⟩ ⟨r, p⟩ e₁ e₂ s₁ s₂ hne h₁ h₂ w hw
+  simp only [sigma, support_pure, Set.mem_singleton_iff, decide_eq_true_eq,
+    Bool.and_eq_true] at h₁ h₂ hw ⊢
   subst hw
+  replace h₁ := h₁.2
+  replace h₂ := h₂.2
   rw [h₁, Option.some.injEq, C.val_smul_mulG, C.val_smul_mulG, ← map_sub, ← map_sub] at h₂
   have h := C.mulG_injective h₂
   have hk : (s₁ - s₂) / (e₁ - e₂) = k := by
@@ -262,18 +280,19 @@ bijection onto the simulator's good responses. -/
 theorem sigma_hvzk : (sigma C).PerfectHVZK (simTranscript C) := by
   rintro ⟨P, hP⟩ w hw
   have hw' : C.mulG w = P := of_decide_eq_true hw
-  let g (e : ZMod n) (s : Good C P e) : X × ZMod n × ZMod n :=
-    (C.x (C.mulG s.1 - e.val • P), e, s.1)
+  let g (e : ZMod n) (s : Good C P e) : (X × X) × ZMod n × ZMod n :=
+    ((C.x (C.mulG s.1 - e.val • P), C.x P), e, s.1)
   -- First, the normalized nonce is a uniform even nonce.
   have hnorm : (sigma C).realTranscript ⟨P, hP⟩ w =ᵈ (do
       let t ← $ᵗ (EvenNonce C)
       let e ← $ᵗ (ZMod n)
-      pure ((C.x (C.mulG t.1), e, t.1 + e * w) : X × ZMod n × ZMod n)) := by
+      pure (((C.x (C.mulG t.1), C.x P), e, t.1 + e * w) : (X × X) × ZMod n × ZMod n)) := by
     have h : (sigma C).realTranscript ⟨P, hP⟩ w =
         (normalize C <$> ($ᵗ (NonzeroScalar n) : ProbComp _)) >>=
         fun t => (do
           let e ← $ᵗ (ZMod n)
-          pure ((C.x (C.mulG t.1), e, t.1 + e * w) : X × ZMod n × ZMod n)) := by
+          pure (((C.x (C.mulG t.1), C.x P), e, t.1 + e * w) :
+            (X × X) × ZMod n × ZMod n)) := by
       simp [ChallengeVerifyProtocol.realTranscript, sigma, normalize, C.x_evenScalar]
     rw [h]
     exact EvalDistEq.bind_left (normalize_uniform C) _
@@ -282,7 +301,7 @@ theorem sigma_hvzk : (sigma C).PerfectHVZK (simTranscript C) := by
       let t ← $ᵗ (EvenNonce C)
       pure (g e (shiftEquiv C w e hw' t))) := by
     refine hnorm.trans ?_
-    let : MeasurableSpace (X × ZMod n × ZMod n) := ⊤
+    let : MeasurableSpace ((X × X) × ZMod n × ZMod n) := ⊤
     refine EvalDistEq.of_evalDist_eq ?_
     rw [OracleComp.evalDist_bind_bind_swap]
     subst hw'
@@ -304,22 +323,21 @@ theorem sigma_simCommitPredictability :
   intro P c₀
   obtain ⟨k, hk⟩ := P.2
   refine prEvent_bind_le_of_forall_le ($ᵗ (ZMod n)) _
-    (fun t : X × ZMod n × ZMod n => t.1 = c₀) fun e => ?_
+    (fun t : (X × X) × ZMod n × ZMod n => t.1 = c₀) fun e => ?_
   simp only [prEvent_norm]
   rw [SampleableType.prEvent_uniformSample, Fintype.card_congr (shiftEquiv C k e hk).symm]
   -- At most one good response gives the commitment `c₀`.
   have hle : (Finset.univ.filter fun s : Good C P e =>
-      C.x (C.mulG s.1 - e.val • P.1) = c₀).card ≤ 1 := by
+      (C.x (C.mulG s.1 - e.val • P.1), C.x P.1) = c₀).card ≤ 1 := by
     refine Finset.card_le_one.mpr fun a ha b hb => ?_
     simp only [Finset.mem_filter, Finset.mem_univ, true_and] at ha hb
-    have := C.eq_of_x_eq a.2.1 b.2.1 (ha.trans hb.symm) (a.2.2.trans b.2.2.symm)
+    have := C.eq_of_x_eq a.2.1 b.2.1 (congrArg Prod.fst (ha.trans hb.symm))
+      (a.2.2.trans b.2.2.symm)
     exact Subtype.ext (C.mulG_injective (sub_left_injective this))
   calc ((Finset.univ.filter _).card : ℝ≥0∞) / (Fintype.card (EvenNonce C) : ℝ≥0∞)
       ≤ 1 / (Fintype.card (EvenNonce C) : ℝ≥0∞) := by
         gcongr; exact_mod_cast hle
     _ = _ := one_div _
-
-variable [DecidableEq X]
 
 /-- **BIP340 is unforgeable under chosen-message attacks (EUF-CMA)** in the
 random oracle model, assuming it is hard to recover the secret key of a
@@ -330,10 +348,10 @@ and `qH` hash queries and succeeding with probability `ε`, the reduction
 theorem euf_cma (M : Type) [DecidableEq M]
     (adv : SignatureAlg.UnforgeableAdversary (FiatShamir.inROM (sigma C) (keyGen C) M))
     (qS qH : ℕ)
-    (hQ : ∀ pk, FiatShamir.signHashQueryBound (M := M) (Commit := X) (Chal := ZMod n)
-      (S' := X × ZMod n) (oa := adv.main pk) qS qH) :
+    (hQ : ∀ pk, FiatShamir.signHashQueryBound (M := M) (Commit := X × X) (Chal := ZMod n)
+      (S' := (X × X) × ZMod n) (oa := adv.main pk) qS qH) :
     let eps := SignatureAlg.unforgeableAdvantage
-        (FiatShamir.runtime (Commit := X) (Chal := ZMod n) M) adv -
+        (FiatShamir.runtime (Commit := X × X) (Chal := ZMod n) M) adv -
       (qS : ℝ≥0∞) * (qS + qH) * (2 / ((n - 1 : ℕ) : ℝ≥0∞))
     eps * (eps / (qH + 1 : ℝ≥0∞) - FiatShamir.challengeSpaceInv (ZMod n)) ≤
       Pr{let x ← (hardRelationExperiment (keyGen C)
@@ -345,5 +363,65 @@ theorem euf_cma (M : Type) [DecidableEq M]
     adv qS qH hQ
   simp only [mul_zero, zero_add, inv_card_evenNonce] at h ⊢
   exact h
+
+/-! ## From key recovery to discrete log -/
+
+/-- The discrete-log experiment: given `k·G` for a uniform nonzero `k`, find `k`. -/
+noncomputable def dlogExperiment (B : Stmt C → ProbComp (ZMod n)) : ProbComp Bool := do
+  let k ← $ᵗ (NonzeroScalar n)
+  let x ← B ⟨C.mulG k.1, k.1, rfl⟩
+  return decide (x = k.1)
+
+/-- `-P`, which is again a multiple of `G`. -/
+def negStmt (P : Stmt C) : Stmt C :=
+  ⟨-P.1, by obtain ⟨k, hk⟩ := P.2; exact ⟨-k, by rw [map_neg, hk]⟩⟩
+
+/-- Solve discrete log with a key-recovery algorithm `A`: if `Y` has an odd y,
+recover the key of `-Y` and negate it. -/
+noncomputable def dlogOfKeyRecovery (A : Stmt C → ProbComp (ZMod n)) (Y : Stmt C) :
+    ProbComp (ZMod n) :=
+  if C.hasEvenY Y.1 then A Y else (fun d => -d) <$> A (negStmt C Y)
+
+/-- **Key recovery is exactly as hard as discrete log**: `dlogOfKeyRecovery A`
+solves discrete log with exactly the probability that `A` recovers the key of
+a BIP340 public key. -/
+theorem hardRelationExperiment_eq_dlog (A : Stmt C → ProbComp (ZMod n)) :
+    hardRelationExperiment (keyGen C) A = dlogExperiment C (dlogOfKeyRecovery C A) := by
+  simp only [hardRelationExperiment, keyGen, dlogExperiment, bind_assoc, pure_bind]
+  congr 1
+  funext k
+  unfold dlogOfKeyRecovery
+  by_cases h : C.hasEvenY (C.mulG k.1) = true
+  · have hk : C.evenScalar k.1 = k.1 := by simp [Curve.evenScalar, h]
+    have hs : (⟨C.mulG (C.evenScalar k.1), C.evenScalar k.1, rfl⟩ : Stmt C) =
+        ⟨C.mulG k.1, k.1, rfl⟩ := Subtype.ext (by rw [hk])
+    simp only [h, if_true, hs]
+    congr 1
+    funext w
+    simp [hk, C.mulG_injective.eq_iff]
+  · have hk : C.evenScalar k.1 = -k.1 := by simp [Curve.evenScalar, h]
+    have hs : (⟨C.mulG (C.evenScalar k.1), C.evenScalar k.1, rfl⟩ : Stmt C) =
+        negStmt C ⟨C.mulG k.1, k.1, rfl⟩ := Subtype.ext (by simp [negStmt, hk])
+    simp only [h, Bool.false_eq_true, if_false, hs, bind_map_left]
+    congr 1
+    funext w
+    simp only [hk, C.mulG_injective.eq_iff, neg_eq_iff_eq_neg]
+
+/-- **BIP340 is EUF-CMA secure under the discrete-log assumption**, in the
+random oracle model: the Pointcheval-Stern bound of `euf_cma`, with the
+key-recovery algorithm turned into a discrete-log solver. -/
+theorem euf_cma_dlog (M : Type) [DecidableEq M]
+    (adv : SignatureAlg.UnforgeableAdversary (FiatShamir.inROM (sigma C) (keyGen C) M))
+    (qS qH : ℕ)
+    (hQ : ∀ pk, FiatShamir.signHashQueryBound (M := M) (Commit := X × X) (Chal := ZMod n)
+      (S' := (X × X) × ZMod n) (oa := adv.main pk) qS qH) :
+    let eps := SignatureAlg.unforgeableAdvantage
+        (FiatShamir.runtime (Commit := X × X) (Chal := ZMod n) M) adv -
+      (qS : ℝ≥0∞) * (qS + qH) * (2 / ((n - 1 : ℕ) : ℝ≥0∞))
+    eps * (eps / (qH + 1 : ℝ≥0∞) - FiatShamir.challengeSpaceInv (ZMod n)) ≤
+      Pr{let x ← (dlogExperiment C (dlogOfKeyRecovery C
+        (FiatShamir.cmaReduction (sigma C) (keyGen C) M (simTranscript C) adv qH)))}[x = true] := by
+  rw [← hardRelationExperiment_eq_dlog]
+  exact euf_cma C M adv qS qH hQ
 
 end Taproot.BIP340Security
