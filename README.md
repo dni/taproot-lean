@@ -56,14 +56,20 @@ Modelling choices:
 
 ### BIP340 batch verification with hash-derived coefficients — `Taproot/BIP340Batch.lean`
 
-In practice the batch coefficients aren't independent random values. They are derived deterministically from the batch, and the attacker picks the batch. This file models them as a random oracle, using the **incremental derivation** of libsecp256k1's batch API: the coefficient of signature `i ≥ 2` is a `b`-bit hash of the first `i` entries, so the attacker can choose later entries after seeing earlier coefficients.
+In practice the batch coefficients aren't independent random values. They are derived deterministically from the batch, and the attacker picks the batch. This file models them as a random oracle, in two ways:
+- **Whole-batch derivation**, as in the BIP340 text (a seed hashing every input, expanded by a CSPRNG): the coefficient of signature `i ≥ 2` is a `b`-bit hash of `(batch, i)`.
+- **Incremental derivation**, as in libsecp256k1's batch API: the coefficient of signature `i ≥ 2` is a `b`-bit hash of the first `i` entries, so the attacker can choose later entries after seeing earlier coefficients.
 
 | Theorem | Statement |
 |---|---|
 | `batch_incremental_sound` | **Batch verification is sound in the random oracle model**: an attacker that makes at most `q` oracle queries and outputs batches of at most `ℓ` signatures gets a batch containing an invalid signature accepted with probability at most `(q + ℓ)/2^b` (`2^b ≤ n`). This holds for every choice of the challenge hash. |
+| `batch_indexed_sound` | The same bound, `(q + ℓ)/2^b`, for whole-batch derivation. |
+| `secp256k1_batch_indexed_sound`, `secp256k1_batch_incremental_sound` | Both bounds on secp256k1 with 128-bit coefficients: `(q + ℓ)/2^128`. |
 | `prEvent_bad_le` | A generic random-oracle bad-event bound with a potential. It allows one fresh answer to complete several bad candidates, as long as earlier queries paid for them. |
 
-Proof idea: cut the winning batch after its last invalid signature. That prefix still passes, and its equation involves only coefficients of its own prefixes. The last of those to be answered must hit the single value that solves the equation. One fresh answer can complete many cached extensions of the queried prefix, but each cached prefix is completed only once, so the total stays at one bad value per query.
+The `q` term is inherent to deterministic coefficients: an attacker can grind batches offline, at one hash per try. With 128-bit coefficients, about `2^64` hash evaluations already give success probability about `2^-64`.
+
+Proof idea (incremental): cut the winning batch after its last invalid signature. That prefix still passes, and its equation involves only coefficients of its own prefixes. The last of those to be answered must hit the single value that solves the equation. One fresh answer can complete many cached extensions of the queried prefix, but each cached prefix is completed only once, so the total stays at one bad value per query. Whole-batch derivation is simpler: one fresh answer completes at most one batch.
 
 ### BIP341: Taproot — `Taproot/BIP341.lean`
 | Theorem | Statement |

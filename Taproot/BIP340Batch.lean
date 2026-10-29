@@ -1,4 +1,5 @@
 import Taproot.BIP340Props
+import Taproot.Secp256k1
 import VCVio.OracleComp.QueryTracking.CachingOracle
 import VCVio.OracleComp.EvalDist.Measure
 import VCVio.EvalDist.ProbabilityBounds
@@ -13,19 +14,27 @@ probability `2^-b`. In practice the coefficients are not independent random
 values: they are derived deterministically from the batch, and the attacker
 chooses the batch. Here they come from a random oracle.
 
-We model **incremental derivation**, as in libsecp256k1's batch verification
-API: coefficient `aᵢ` (for `i ≥ 2`) is the hash of the first `i` entries of
-the batch, so it is known as soon as those entries are, and the attacker may
-choose the later entries after seeing it.
+We model two derivations, both as a random oracle with `b`-bit answers:
 
-* `batchGame`: the attacker, with access to the random oracle, outputs a
-  batch; the verifier derives the coefficients from the same oracle.
-* `batch_incremental_sound`: if the attacker makes at most `q` oracle queries
-  and outputs batches of at most `ℓ` entries, then the batch passes while
-  containing an invalid signature with probability at most `(q + ℓ)/2^b`.
-  This holds for every choice of the challenge hash.
+* **whole-batch derivation**, as in the BIP340 text: coefficient `aᵢ` (for
+  `i ≥ 2`) is the hash of the whole batch together with `i`;
+* **incremental derivation**, as in libsecp256k1's batch verification API:
+  `aᵢ` is the hash of the first `i` entries of the batch, so it is known as
+  soon as those entries are, and the attacker may choose the later entries
+  after seeing it.
 
-The proof charges each win to a random oracle answer. Let `j` be the last
+`batchGame`: the attacker, with access to the random oracle, outputs a batch;
+the verifier derives the coefficients from the same oracle.
+`batch_indexed_sound` and `batch_incremental_sound`: if the attacker makes at
+most `q` oracle queries and outputs batches of at most `ℓ` entries, then the
+batch passes while containing an invalid signature with probability at most
+`(q + ℓ)/2^b`. This holds for every choice of the challenge hash. The
+`secp256k1_…` versions take `b = 128`.
+
+For whole-batch derivation one fresh answer can complete at most one batch,
+which gives the bound directly. The incremental case needs more care.
+
+For incremental derivation, the proof charges each win to a random oracle answer. Let `j` be the last
 invalid entry of the winning batch. Then the prefix `t` of the first `j`
 entries already passes, and its equation `Σ aᵢ·defectᵢ = 0` involves only
 coefficients of prefixes of `t`. Whichever of those (with a nonzero defect) is
@@ -159,35 +168,6 @@ theorem batchVerify_take (hord : PrimeOrder n E) (L : List (Entry n X M)) {j : �
     simp only [List.get_eq_getElem] at hv
     simp [f, hi, hv]
 
-end Batch
-
-/-! ## Incremental coefficient derivation -/
-
-section Incremental
-
-variable {n : ℕ} [Fact n.Prime] {E X M : Type} [AddCommGroup E] [DecidableEq E] [DecidableEq X]
-  [DecidableEq M] (C : Curve n E X) (challenge : X → X → M → ZMod n) (b : ℕ)
-
-/-- The random oracle that derives coefficients: a batch prefix ↦ a `b`-bit value. -/
-abbrev PrefixSpec (n : ℕ) (X M : Type) (b : ℕ) := List (Entry n X M) →ₒ Fin (2 ^ b)
-
-/-- The verifier's coefficient for position `i` (from `0`) of batch `L`: `1`
-for the first signature (BIP340's `a₁ = 1`), otherwise the hash of the first
-`i + 1` entries. -/
-def coeffQuery (L : List (Entry n X M)) (i : ℕ) : OracleComp (PrefixSpec n X M b) (ZMod n) :=
-  if i = 0 then pure 1
-  else (fun h : Fin (2 ^ b) => ((h : ℕ) : ZMod n)) <$>
-    (liftM ((PrefixSpec n X M b).query (L.take (i + 1))) :
-      OracleComp (PrefixSpec n X M b) (Fin (2 ^ b)))
-
-/-- The batch verification game: the attacker `adv` outputs a batch, then the
-verifier derives its coefficients from the same random oracle. -/
-def batchGame (adv : OracleComp (PrefixSpec n X M b) (List (Entry n X M))) :
-    OracleComp (PrefixSpec n X M b) (List (Entry n X M) × List (ZMod n)) := do
-  let L ← adv
-  let as ← (List.range L.length).mapM (coeffQuery b L)
-  return (L, as)
-
 /-- Batch verification of `L` with coefficients `as`. -/
 def verifyList (L : List (Entry n X M)) (as : List (ZMod n)) : Bool :=
   batchVerify C challenge L.get (fun i => as.getD i 0)
@@ -196,6 +176,143 @@ def verifyList (L : List (Entry n X M)) (as : List (ZMod n)) : Bool :=
 def Wins (z : List (Entry n X M) × List (ZMod n)) : Prop :=
   verifyList C challenge z.1 z.2 = true ∧
     ∃ i : Fin z.1.length, valid C challenge (z.1.get i) = false
+
+end Batch
+
+/-! ## Deriving the coefficients from a random oracle -/
+
+section Derivation
+
+variable {n : ℕ} {X M : Type} {K : Type} [DecidableEq K] (b : ℕ)
+  (key : List (Entry n X M) → ℕ → K)
+
+/-- A random oracle with `b`-bit answers on inputs of type `K`. -/
+abbrev KeySpec (K : Type) (b : ℕ) := K →ₒ Fin (2 ^ b)
+
+/-- The verifier's coefficient for position `i` (from `0`) of batch `L`: `1`
+for the first signature (BIP340's `a₁ = 1`), otherwise the hash of `key L i`. -/
+def coeffQuery (L : List (Entry n X M)) (i : ℕ) : OracleComp (KeySpec K b) (ZMod n) :=
+  if i = 0 then pure 1
+  else (fun h : Fin (2 ^ b) => ((h : ℕ) : ZMod n)) <$>
+    (liftM ((KeySpec K b).query (key L i)) : OracleComp (KeySpec K b) (Fin (2 ^ b)))
+
+/-- The batch verification game: the attacker `adv` outputs a batch, then the
+verifier derives its coefficients from the same random oracle. -/
+def batchGame (adv : OracleComp (KeySpec K b) (List (Entry n X M))) :
+    OracleComp (KeySpec K b) (List (Entry n X M) × List (ZMod n)) := do
+  let L ← adv
+  let as ← (List.range L.length).mapM (coeffQuery b key L)
+  return (L, as)
+
+theorem coeffQuery_spec (L : List (Entry n X M)) (i : ℕ) (c : (KeySpec K b).QueryCache)
+    (z : ZMod n × (KeySpec K b).QueryCache)
+    (hz : z ∈ support ((simulateQ (KeySpec K b).cachingOracle (coeffQuery b key L i)).run c)) :
+    (i = 0 → z.1 = 1) ∧
+      (i ≠ 0 → ∃ h : Fin (2 ^ b), z.2 (key L i) = some h ∧ z.1 = ((h : ℕ) : ZMod n)) := by
+  unfold coeffQuery at hz
+  split_ifs at hz with hi
+  · simp only [simulateQ_pure, StateT.run_pure, support_pure, Set.mem_singleton_iff] at hz
+    subst hz
+    exact ⟨fun _ => rfl, fun h => absurd hi h⟩
+  · rw [simulateQ_map, cachingOracle.simulateQ_query, StateT.run_map, support_map] at hz
+    obtain ⟨⟨h, c'⟩, hmem, rfl⟩ := hz
+    exact ⟨fun h0 => absurd h0 hi, fun _ => ⟨h, cachingOracle_query_caches _ _ _ _ hmem, rfl⟩⟩
+
+theorem coeffs_spec (L : List (Entry n X M)) (is : List ℕ) (c : (KeySpec K b).QueryCache)
+    (z : List (ZMod n) × (KeySpec K b).QueryCache)
+    (hz : z ∈ support
+      ((simulateQ (KeySpec K b).cachingOracle (is.mapM (coeffQuery b key L))).run c)) :
+    ∀ k (hk : k < is.length), (is[k] = 0 → z.1.getD k 0 = 1) ∧
+      (is[k] ≠ 0 → ∃ h : Fin (2 ^ b),
+        z.2 (key L is[k]) = some h ∧ z.1.getD k 0 = ((h : ℕ) : ZMod n)) := by
+  induction is generalizing c z with
+  | nil => intro k hk; simp at hk
+  | cons i is ih =>
+    rw [List.mapM_cons, simulateQ_bind, StateT.run_bind, mem_support_bind_iff] at hz
+    obtain ⟨⟨a, c₁⟩, h₁, hz⟩ := hz
+    rw [simulateQ_bind, StateT.run_bind, mem_support_bind_iff] at hz
+    obtain ⟨⟨as, c₂⟩, h₂, hz⟩ := hz
+    simp only [simulateQ_pure, StateT.run_pure, support_pure, Set.mem_singleton_iff] at hz
+    subst hz
+    intro k hk
+    cases k with
+    | zero =>
+      obtain ⟨hz0, hnz⟩ := coeffQuery_spec b key L i c _ h₁
+      refine ⟨fun h => by simpa using hz0 h, fun h => ?_⟩
+      obtain ⟨v, hv, ha⟩ := hnz (by simpa using h)
+      have hle := simulateQ_cachingOracle_cache_le _ c₁ _ h₂
+      exact ⟨v, by simpa using hle hv, by simpa using ha⟩
+    | succ k =>
+      simpa using ih c₁ (as, c₂) h₂ k (by simpa using hk)
+
+/-- **What the verifier leaves in the cache**: coefficient `0` is `1`, and every
+other coefficient `k` is the cached hash of `key L k`. -/
+theorem game_spec (adv : OracleComp (KeySpec K b) (List (Entry n X M)))
+    (L : List (Entry n X M)) (as : List (ZMod n)) (c : (KeySpec K b).QueryCache)
+    (hz : ((L, as), c) ∈
+      support ((simulateQ (KeySpec K b).cachingOracle (batchGame b key adv)).run ∅)) :
+    (∀ k < L.length, k = 0 → as.getD k 0 = 1) ∧
+      (∀ k < L.length, k ≠ 0 → ∃ h : Fin (2 ^ b),
+        c (key L k) = some h ∧ as.getD k 0 = ((h : ℕ) : ZMod n)) := by
+  unfold batchGame at hz
+  rw [simulateQ_bind, StateT.run_bind, mem_support_bind_iff] at hz
+  obtain ⟨⟨L', c₁⟩, -, hz⟩ := hz
+  rw [simulateQ_bind, StateT.run_bind, mem_support_bind_iff] at hz
+  obtain ⟨⟨as', c₂⟩, h₂, hz⟩ := hz
+  simp only [simulateQ_pure, StateT.run_pure, support_pure, Set.mem_singleton_iff,
+    Prod.mk.injEq] at hz
+  obtain ⟨⟨rfl, rfl⟩, rfl⟩ := hz
+  have hco := coeffs_spec b key L (List.range L.length) c₁ (as, c) h₂
+  refine ⟨fun k hk h0 => by simpa using (hco k (by simpa using hk)).1 (by simpa using h0),
+    fun k hk h0 => ?_⟩
+  obtain ⟨h, hc, ha⟩ := (hco k (by simpa using hk)).2 (by simpa using h0)
+  rw [List.getElem_range] at hc
+  exact ⟨h, hc, by simpa using ha⟩
+
+omit [DecidableEq K] in
+theorem coeffQuery_bound (L : List (Entry n X M)) (i : ℕ) :
+    IsTotalQueryBound (coeffQuery b key L i) 1 := by
+  unfold coeffQuery
+  split_ifs
+  · trivial
+  · rw [map_eq_bind_pure_comp, isTotalQueryBound_query_bind_iff]
+    exact ⟨Nat.one_pos, fun _ => trivial⟩
+
+omit [DecidableEq K] in
+theorem coeffs_bound (L : List (Entry n X M)) (is : List ℕ) :
+    IsTotalQueryBound (is.mapM (coeffQuery b key L)) is.length := by
+  induction is with
+  | nil => trivial
+  | cons i is ih =>
+    rw [List.mapM_cons]
+    refine (isTotalQueryBound_bind (coeffQuery_bound b key L i) fun _ =>
+      isTotalQueryBound_bind (n₂ := 0) ih fun _ => ?_).mono (by simp; omega)
+    trivial
+
+omit [DecidableEq K] in
+theorem batchGame_bound (adv : OracleComp (KeySpec K b) (List (Entry n X M)))
+    {q ℓ : ℕ} (hq : IsTotalQueryBound adv q) (hℓ : ∀ L ∈ support adv, L.length ≤ ℓ) :
+    IsTotalQueryBound (batchGame b key adv) (q + ℓ) := by
+  unfold batchGame
+  refine isTotalQueryBound_bind_of_mem_support hq fun L hL => ?_
+  refine (isTotalQueryBound_bind (n₂ := 0) (coeffs_bound b key L _) fun _ => ?_).mono
+    (by simpa using hℓ L hL)
+  trivial
+
+end Derivation
+
+/-! ## Incremental derivation -/
+
+section Incremental
+
+variable {n : ℕ} [Fact n.Prime] {E X M : Type} [AddCommGroup E] [DecidableEq E] [DecidableEq X]
+  [DecidableEq M] (C : Curve n E X) (challenge : X → X → M → ZMod n) (b : ℕ)
+
+/-- Incremental derivation hashes the first `i + 1` entries. -/
+def prefixKey (L : List (Entry n X M)) (i : ℕ) : List (Entry n X M) := L.take (i + 1)
+
+/-- The random oracle of incremental derivation: a batch prefix ↦ a `b`-bit value. -/
+abbrev PrefixSpec (n : ℕ) (X M : Type) (b : ℕ) := KeySpec (List (Entry n X M)) b
 
 /-! ### Bookkeeping on the random oracle's cache -/
 
@@ -359,105 +476,21 @@ theorem bad_step [UniformAnswerMeasure (PrefixSpec n X M b)] (hord : PrimeOrder 
       _ = 1 + Φ C challenge b c := by
           rw [ENat.toENNReal_add, Set.encard_singleton, ENat.toENNReal_one, add_comm, Φ]
 
-/-! ### The verifier's queries -/
-
-theorem coeffQuery_spec (L : List (Entry n X M)) (i : ℕ) (c : (PrefixSpec n X M b).QueryCache)
-    (z : ZMod n × (PrefixSpec n X M b).QueryCache)
-    (hz : z ∈ support ((simulateQ (PrefixSpec n X M b).cachingOracle (coeffQuery b L i)).run c)) :
-    (i = 0 → z.1 = 1) ∧
-      (i ≠ 0 → ∃ h : Fin (2 ^ b), z.2 (L.take (i + 1)) = some h ∧ z.1 = ((h : ℕ) : ZMod n)) := by
-  unfold coeffQuery at hz
-  split_ifs at hz with hi
-  · simp only [simulateQ_pure, StateT.run_pure, support_pure, Set.mem_singleton_iff] at hz
-    subst hz
-    exact ⟨fun _ => rfl, fun h => absurd hi h⟩
-  · rw [simulateQ_map, cachingOracle.simulateQ_query, StateT.run_map, support_map] at hz
-    obtain ⟨⟨h, c'⟩, hmem, rfl⟩ := hz
-    exact ⟨fun h0 => absurd h0 hi, fun _ => ⟨h, cachingOracle_query_caches _ _ _ _ hmem, rfl⟩⟩
-
-theorem coeffs_spec (L : List (Entry n X M)) (is : List ℕ) (c : (PrefixSpec n X M b).QueryCache)
-    (z : List (ZMod n) × (PrefixSpec n X M b).QueryCache)
-    (hz : z ∈ support
-      ((simulateQ (PrefixSpec n X M b).cachingOracle (is.mapM (coeffQuery b L))).run c)) :
-    ∀ k (hk : k < is.length), (is[k] = 0 → z.1.getD k 0 = 1) ∧
-      (is[k] ≠ 0 → ∃ h : Fin (2 ^ b),
-        z.2 (L.take (is[k] + 1)) = some h ∧ z.1.getD k 0 = ((h : ℕ) : ZMod n)) := by
-  induction is generalizing c z with
-  | nil => intro k hk; simp at hk
-  | cons i is ih =>
-    rw [List.mapM_cons, simulateQ_bind, StateT.run_bind, mem_support_bind_iff] at hz
-    obtain ⟨⟨a, c₁⟩, h₁, hz⟩ := hz
-    rw [simulateQ_bind, StateT.run_bind, mem_support_bind_iff] at hz
-    obtain ⟨⟨as, c₂⟩, h₂, hz⟩ := hz
-    simp only [simulateQ_pure, StateT.run_pure, support_pure, Set.mem_singleton_iff] at hz
-    subst hz
-    intro k hk
-    cases k with
-    | zero =>
-      obtain ⟨hz0, hnz⟩ := coeffQuery_spec b L i c _ h₁
-      refine ⟨fun h => by simpa using hz0 h, fun h => ?_⟩
-      obtain ⟨v, hv, ha⟩ := hnz (by simpa using h)
-      have hle := simulateQ_cachingOracle_cache_le _ c₁ _ h₂
-      exact ⟨v, by simpa using hle hv, by simpa using ha⟩
-    | succ k =>
-      simpa using ih c₁ (as, c₂) h₂ k (by simpa using hk)
-
-omit [DecidableEq X] [DecidableEq M] in
-theorem coeffQuery_bound (L : List (Entry n X M)) (i : ℕ) :
-    IsTotalQueryBound (coeffQuery b L i) 1 := by
-  unfold coeffQuery
-  split_ifs
-  · trivial
-  · rw [map_eq_bind_pure_comp, isTotalQueryBound_query_bind_iff]
-    exact ⟨Nat.one_pos, fun _ => trivial⟩
-
-omit [DecidableEq X] [DecidableEq M] in
-theorem coeffs_bound (L : List (Entry n X M)) (is : List ℕ) :
-    IsTotalQueryBound (is.mapM (coeffQuery b L)) is.length := by
-  induction is with
-  | nil => trivial
-  | cons i is ih =>
-    rw [List.mapM_cons]
-    refine (isTotalQueryBound_bind (coeffQuery_bound b L i) fun _ =>
-      isTotalQueryBound_bind (n₂ := 0) ih fun _ => ?_).mono (by simp; omega)
-    trivial
-
-omit [DecidableEq X] [DecidableEq M] in
-theorem batchGame_bound (adv : OracleComp (PrefixSpec n X M b) (List (Entry n X M)))
-    {q ℓ : ℕ} (hq : IsTotalQueryBound adv q) (hℓ : ∀ L ∈ support adv, L.length ≤ ℓ) :
-    IsTotalQueryBound (batchGame b adv) (q + ℓ) := by
-  unfold batchGame
-  refine isTotalQueryBound_bind_of_mem_support hq fun L hL => ?_
-  refine (isTotalQueryBound_bind (n₂ := 0) (coeffs_bound b L _) fun _ => ?_).mono
-    (by simpa using hℓ L hL)
-  trivial
-
 /-- **A win leaves a bad cache**: if the batch passes although it contains an
 invalid signature, cut it after its last invalid signature; that prefix has a
 cached coefficient for each invalid signature and passes with them. -/
 theorem wins_bad (hord : PrimeOrder n E)
     (adv : OracleComp (PrefixSpec n X M b) (List (Entry n X M)))
     (z : (List (Entry n X M) × List (ZMod n)) × (PrefixSpec n X M b).QueryCache)
-    (hz : z ∈ support ((simulateQ (PrefixSpec n X M b).cachingOracle (batchGame b adv)).run ∅))
+    (hz : z ∈ support
+      ((simulateQ (PrefixSpec n X M b).cachingOracle (batchGame b prefixKey adv)).run ∅))
     (hw : Wins C challenge z.1) : Bad C challenge b z.2 := by
   have : Fact (1 < n) := ⟨(Fact.out : n.Prime).one_lt⟩
-  unfold batchGame at hz
-  rw [simulateQ_bind, StateT.run_bind, mem_support_bind_iff] at hz
-  obtain ⟨⟨L, c₁⟩, -, hz⟩ := hz
-  rw [simulateQ_bind, StateT.run_bind, mem_support_bind_iff] at hz
-  obtain ⟨⟨as, c₂⟩, h₂, hz⟩ := hz
-  simp only [simulateQ_pure, StateT.run_pure, support_pure, Set.mem_singleton_iff] at hz
-  subst hz
-  simp only at h₂ hw
+  obtain ⟨⟨L, as⟩, c₂⟩ := z
   change Bad C challenge b c₂
-  have hco := coeffs_spec b L (List.range L.length) c₁ (as, c₂) h₂
-  have h1 : ∀ k < L.length, k = 0 → as.getD k 0 = 1 := fun k hk h0 => by
-    simpa using (hco k (by simpa using hk)).1 (by simpa using h0)
+  obtain ⟨h1, h2'⟩ := game_spec b prefixKey adv L as c₂ hz
   have h2 : ∀ k < L.length, k ≠ 0 → ∃ h : Fin (2 ^ b),
-      c₂ (L.take (k + 1)) = some h ∧ as.getD k 0 = ((h : ℕ) : ZMod n) := fun k hk h0 => by
-    obtain ⟨h, hc, ha⟩ := (hco k (by simpa using hk)).2 (by simpa using h0)
-    rw [List.getElem_range] at hc
-    exact ⟨h, hc, by simpa using ha⟩
+      c₂ (L.take (k + 1)) = some h ∧ as.getD k 0 = ((h : ℕ) : ZMod n) := h2'
   obtain ⟨hv, i, hi⟩ := hw
   simp only at hv i hi
   -- the last invalid signature
@@ -511,16 +544,218 @@ theorem batch_incremental_sound [UniformAnswerMeasure (PrefixSpec n X M b)]
     (hord : PrimeOrder n E) (hb : 2 ^ b ≤ n)
     (adv : OracleComp (PrefixSpec n X M b) (List (Entry n X M))) (q ℓ : ℕ)
     (hq : IsTotalQueryBound adv q) (hℓ : ∀ L ∈ support adv, L.length ≤ ℓ) :
-    Pr{let z ← (simulateQ (PrefixSpec n X M b).cachingOracle (batchGame b adv)).run ∅}[
-      Wins C challenge z.1] ≤ ((q + ℓ : ℕ) : ℝ≥0∞) / (2 ^ b : ℕ) := by
+    Pr{let z ← (simulateQ (PrefixSpec n X M b).cachingOracle
+      (batchGame b prefixKey adv)).run ∅}[Wins C challenge z.1] ≤
+        ((q + ℓ : ℕ) : ℝ≥0∞) / (2 ^ b : ℕ) := by
   have hmain := prEvent_bad_le (Bad C challenge b) (Φ C challenge b)
-    (fun c t h₁ h₂ => bad_step C challenge b hord hb c t h₁ h₂) (batchGame b adv) (q + ℓ)
-    (batchGame_bound b adv hq hℓ) ∅ (bad_empty C challenge b)
+    (fun c t h₁ h₂ => bad_step C challenge b hord hb c t h₁ h₂) (batchGame b prefixKey adv)
+    (q + ℓ)
+    (batchGame_bound b prefixKey adv hq hℓ) ∅ (bad_empty C challenge b)
   rw [Φ_empty, add_zero, Fintype.card_fin] at hmain
   rw [div_eq_mul_inv]
   exact (prEvent_mono_of_support _ _ _ fun z hz hw =>
     wins_bad C challenge b hord adv z hz hw).trans hmain
 
 end Incremental
+
+/-! ## Derivation from the whole batch
+
+BIP340 itself derives the coefficients from a seed that hashes the whole
+batch, expanded with a CSPRNG. We idealize this as a random oracle on
+`(batch, index)`. Each coefficient now depends on every entry, so one fresh
+answer completes at most one batch and no potential is needed. -/
+
+section Indexed
+
+variable {n : ℕ} [Fact n.Prime] {E X M : Type} [AddCommGroup E] [DecidableEq E] [DecidableEq X]
+  [DecidableEq M] (C : Curve n E X) (challenge : X → X → M → ZMod n) (b : ℕ)
+
+/-- Coefficient `i` hashes the whole batch together with `i`. -/
+def indexKey (L : List (Entry n X M)) (i : ℕ) : List (Entry n X M) × ℕ := (L, i)
+
+/-- The random oracle of whole-batch derivation: `(batch, index)` ↦ a `b`-bit value. -/
+abbrev IndexSpec (n : ℕ) (X M : Type) (b : ℕ) := KeySpec (List (Entry n X M) × ℕ) b
+
+namespace Indexed
+
+/-- The coefficients of batch `L` as recorded in cache `c`. -/
+def cacheCoeff (c : (IndexSpec n X M b).QueryCache) (L : List (Entry n X M))
+    (i : Fin L.length) : ZMod n :=
+  if (i : ℕ) = 0 then 1 else ((c (L, i)).map fun h => ((h : ℕ) : ZMod n)).getD 0
+
+/-- The bad event: some batch with an invalid signature has the coefficients
+of all its invalid signatures in the cache, and passes with them. -/
+def Bad (c : (IndexSpec n X M b).QueryCache) : Prop :=
+  ∃ L : List (Entry n X M), (∃ j : Fin L.length, valid C challenge (L.get j) = false) ∧
+    (∀ i : Fin L.length, (i : ℕ) ≠ 0 → valid C challenge (L.get i) = false →
+      c (L, i) ≠ none) ∧
+    batchVerify C challenge L.get (cacheCoeff b c L) = true
+
+omit [DecidableEq M] in
+theorem bad_empty (hord : PrimeOrder n E) : ¬ Bad C challenge b ∅ := by
+  have : Fact (1 < n) := ⟨(Fact.out : n.Prime).one_lt⟩
+  rintro ⟨L, ⟨j, hj⟩, hcov, hbv⟩
+  -- every invalid signature sits at position `0`
+  have h0 : ∀ i : Fin L.length, valid C challenge (L.get i) = false → (i : ℕ) = 0 :=
+    fun i hi => by_contra fun h => hcov i h hi rfl
+  have hsingle := batchVerify_sound_single C challenge hord L.get hj
+    (fun i hi => by
+      by_contra hv
+      exact hi (Fin.ext ((h0 i (by simpa using hv)).trans (h0 j hj).symm)))
+    (a := cacheCoeff b ∅ L) (by simp [cacheCoeff, h0 j hj])
+  rw [hbv] at hsingle
+  cases hsingle
+
+/-- **One fresh answer**: the answer for `(L, k)` can only complete batch `L`,
+and at most one value of it makes `L` pass. -/
+theorem bad_step [UniformAnswerMeasure (IndexSpec n X M b)] (hord : PrimeOrder n E)
+    (hb : 2 ^ b ≤ n) (c : (IndexSpec n X M b).QueryCache) (p : List (Entry n X M) × ℕ)
+    (hbad : ¬ Bad C challenge b c) (hp : c p = none) :
+    ∃ k Ψ : ℝ≥0∞,
+      Pr{let u ← (liftM ((IndexSpec n X M b).query p) :
+          OracleComp (IndexSpec n X M b) (Fin (2 ^ b)))}[
+        Bad C challenge b (c.cacheQuery p u)] ≤ k * (Fintype.card (Fin (2 ^ b)) : ℝ≥0∞)⁻¹ ∧
+      (∀ u, (fun _ => (0 : ℝ≥0∞)) (c.cacheQuery p u) ≤ Ψ) ∧
+        k + Ψ ≤ 1 + (fun _ => (0 : ℝ≥0∞)) c := by
+  classical
+  refine ⟨1, 0, ?_, fun _ => le_rfl, by simp⟩
+  obtain ⟨L₀, k₀⟩ := p
+  -- a bad answer makes `L₀` pass, and position `k₀` holds an invalid signature
+  have hcand : ∀ u, Bad C challenge b (c.cacheQuery (L₀, k₀) u) →
+      ∃ hk : k₀ < L₀.length, k₀ ≠ 0 ∧ valid C challenge (L₀.get ⟨k₀, hk⟩) = false ∧
+        batchVerify C challenge L₀.get (cacheCoeff b (c.cacheQuery (L₀, k₀) u) L₀) = true := by
+    rintro u ⟨L, hinv, hcov, hbv⟩
+    by_cases hcovc : ∀ i : Fin L.length, (i : ℕ) ≠ 0 → valid C challenge (L.get i) = false →
+        c (L, i) ≠ none
+    · refine absurd ⟨L, hinv, hcovc, batchVerify_congr C challenge hord L.get (fun i hi => ?_)
+        hbv⟩ hbad
+      unfold cacheCoeff
+      split_ifs with hi0
+      · rfl
+      · have hne : ((L, (i : ℕ)) : List (Entry n X M) × ℕ) ≠ (L₀, k₀) :=
+          fun h => hcovc i hi0 hi (h ▸ hp)
+        rw [QueryCache.cacheQuery_of_ne _ _ hne]
+    · push Not at hcovc
+      obtain ⟨i₀, hi₀, hv₀, hnone⟩ := hcovc
+      have heq : ((L, (i₀ : ℕ)) : List (Entry n X M) × ℕ) = (L₀, k₀) := by
+        by_contra hne
+        exact hcov i₀ hi₀ hv₀ (by rwa [QueryCache.cacheQuery_of_ne _ _ hne])
+      obtain ⟨rfl, rfl⟩ := Prod.mk.inj heq
+      exact ⟨i₀.2, hi₀, hv₀, hbv⟩
+  by_cases hk : ∃ hk : k₀ < L₀.length, k₀ ≠ 0 ∧ valid C challenge (L₀.get ⟨k₀, hk⟩) = false
+  swap
+  · refine le_of_eq_of_le (prEvent_eq_zero_of_forall_mem_support _ _ fun u _ hu => ?_) bot_le
+    obtain ⟨hk', hk0, hv, -⟩ := hcand u hu
+    exact hk ⟨hk', hk0, hv⟩
+  obtain ⟨hk, hk0, hv⟩ := hk
+  refine (prEvent_mono_of_support _ _
+    (fun u => batchVerify C challenge L₀.get (cacheCoeff b (c.cacheQuery (L₀, k₀) u) L₀) = true)
+    fun u _ hu => (hcand u hu).2.2.2).trans ?_
+  rw [prEvent_liftM_query_eq_card_div, one_mul]
+  have hcard : (Finset.univ.filter fun u : Fin (2 ^ b) =>
+      batchVerify C challenge L₀.get (cacheCoeff b (c.cacheQuery (L₀, k₀) u) L₀) = true).card ≤ 1 :=
+      by
+    refine Finset.card_le_one.mpr fun u hu u' hu' => ?_
+    simp only [Finset.mem_filter, Finset.mem_univ, true_and] at hu hu'
+    have h := batchVerify_sound C challenge hord L₀.get (j := ⟨k₀, hk⟩) hv (fun i hi => by
+      unfold cacheCoeff
+      split_ifs with hi0
+      · rfl
+      · have hne : ((L₀, (i : ℕ)) : List (Entry n X M) × ℕ) ≠ (L₀, k₀) :=
+          fun h => hi (Fin.ext (Prod.mk.inj h).2)
+        rw [QueryCache.cacheQuery_of_ne _ _ hne, QueryCache.cacheQuery_of_ne _ _ hne]) hu hu'
+    simp only [cacheCoeff, hk0, ↓reduceIte, QueryCache.cacheQuery_self] at h
+    have h' : ((u : ℕ) : ZMod n) = ((u' : ℕ) : ZMod n) := by simpa using h
+    rw [ZMod.natCast_eq_natCast_iff', Nat.mod_eq_of_lt (u.2.trans_le hb),
+      Nat.mod_eq_of_lt (u'.2.trans_le hb)] at h'
+    exact Fin.ext h'
+  calc ((Finset.univ.filter fun u : Fin (2 ^ b) =>
+        batchVerify C challenge L₀.get (cacheCoeff b (c.cacheQuery (L₀, k₀) u) L₀) = true).card :
+          ℝ≥0∞) / (Fintype.card (Fin (2 ^ b)) : ℝ≥0∞)
+      ≤ 1 / (Fintype.card (Fin (2 ^ b)) : ℝ≥0∞) := by gcongr; exact_mod_cast hcard
+    _ = _ := one_div _
+
+/-- **A win leaves a bad cache**: the verifier cached the coefficient of every
+signature of the winning batch. -/
+theorem wins_bad (hord : PrimeOrder n E)
+    (adv : OracleComp (IndexSpec n X M b) (List (Entry n X M)))
+    (z : (List (Entry n X M) × List (ZMod n)) × (IndexSpec n X M b).QueryCache)
+    (hz : z ∈ support
+      ((simulateQ (IndexSpec n X M b).cachingOracle (batchGame b indexKey adv)).run ∅))
+    (hw : Wins C challenge z.1) : Bad C challenge b z.2 := by
+  obtain ⟨⟨L, as⟩, c⟩ := z
+  change Bad C challenge b c
+  obtain ⟨h1, h2'⟩ := game_spec b indexKey adv L as c hz
+  have h2 : ∀ k < L.length, k ≠ 0 → ∃ h : Fin (2 ^ b),
+      c (L, k) = some h ∧ as.getD k 0 = ((h : ℕ) : ZMod n) := h2'
+  obtain ⟨hv, i, hi⟩ := hw
+  refine ⟨L, ⟨i, hi⟩, fun i hi0 _ => ?_, ?_⟩
+  · obtain ⟨h, hc, -⟩ := h2 i i.2 hi0
+    simp [hc]
+  · refine batchVerify_congr C challenge hord _ (fun i _ => ?_) hv
+    unfold cacheCoeff
+    split_ifs with hi0
+    · exact h1 i i.2 hi0
+    · obtain ⟨h, hc, ha⟩ := h2 i i.2 hi0
+      rw [hc]
+      simpa using ha
+
+end Indexed
+
+/-- **BIP340 batch verification is sound with coefficients derived from the
+whole batch**, in the random oracle model: the coefficient of signature `i`
+(for `i ≥ 2`) is a `b`-bit hash of the batch and `i`, with `2^b ≤ n`. An
+attacker that makes at most `q` oracle queries and outputs batches of at most
+`ℓ` signatures gets a batch containing an invalid signature accepted with
+probability at most `(q + ℓ)/2^b`. This holds for every challenge hash. -/
+theorem batch_indexed_sound [UniformAnswerMeasure (IndexSpec n X M b)]
+    (hord : PrimeOrder n E) (hb : 2 ^ b ≤ n)
+    (adv : OracleComp (IndexSpec n X M b) (List (Entry n X M))) (q ℓ : ℕ)
+    (hq : IsTotalQueryBound adv q) (hℓ : ∀ L ∈ support adv, L.length ≤ ℓ) :
+    Pr{let z ← (simulateQ (IndexSpec n X M b).cachingOracle
+      (batchGame b indexKey adv)).run ∅}[Wins C challenge z.1] ≤
+        ((q + ℓ : ℕ) : ℝ≥0∞) / (2 ^ b : ℕ) := by
+  have hmain := prEvent_bad_le (Indexed.Bad C challenge b) (fun _ => 0)
+    (fun c t h₁ h₂ => Indexed.bad_step C challenge b hord hb c t h₁ h₂)
+    (batchGame b indexKey adv) (q + ℓ) (batchGame_bound b indexKey adv hq hℓ) ∅
+    (Indexed.bad_empty C challenge b hord)
+  rw [add_zero, Fintype.card_fin] at hmain
+  rw [div_eq_mul_inv]
+  exact (prEvent_mono_of_support _ _ _ fun z hz hw =>
+    Indexed.wins_bad C challenge b hord adv z hz hw).trans hmain
+
+end Indexed
+
+/-! ## On secp256k1 with 128-bit coefficients -/
+
+section Secp256k1
+
+open Secp256k1
+
+theorem two_pow_128_le_n : 2 ^ 128 ≤ n := by decide
+
+/-- `batch_incremental_sound` on secp256k1 with 128-bit coefficients: an
+invalid batch is accepted with probability at most `(q + ℓ)/2^128`. -/
+theorem secp256k1_batch_incremental_sound {M : Type} [DecidableEq M]
+    (challenge : F → F → M → ZMod n) [UniformAnswerMeasure (PrefixSpec n F M 128)]
+    (hord : PrimeOrder n Point) (adv : OracleComp (PrefixSpec n F M 128) (List (Entry n F M)))
+    (q ℓ : ℕ) (hq : IsTotalQueryBound adv q) (hℓ : ∀ L ∈ support adv, L.length ≤ ℓ) :
+    Pr{let z ← (simulateQ (PrefixSpec n F M 128).cachingOracle
+      (batchGame 128 prefixKey adv)).run ∅}[Wins secp256k1 challenge z.1] ≤
+        ((q + ℓ : ℕ) : ℝ≥0∞) / (2 ^ 128 : ℕ) :=
+  batch_incremental_sound secp256k1 challenge 128 hord two_pow_128_le_n adv q ℓ hq hℓ
+
+/-- `batch_indexed_sound` on secp256k1 with 128-bit coefficients: an invalid
+batch is accepted with probability at most `(q + ℓ)/2^128`. -/
+theorem secp256k1_batch_indexed_sound {M : Type} [DecidableEq M]
+    (challenge : F → F → M → ZMod n) [UniformAnswerMeasure (IndexSpec n F M 128)]
+    (hord : PrimeOrder n Point) (adv : OracleComp (IndexSpec n F M 128) (List (Entry n F M)))
+    (q ℓ : ℕ) (hq : IsTotalQueryBound adv q) (hℓ : ∀ L ∈ support adv, L.length ≤ ℓ) :
+    Pr{let z ← (simulateQ (IndexSpec n F M 128).cachingOracle
+      (batchGame 128 indexKey adv)).run ∅}[Wins secp256k1 challenge z.1] ≤
+        ((q + ℓ : ℕ) : ℝ≥0∞) / (2 ^ 128 : ℕ) :=
+  batch_indexed_sound secp256k1 challenge 128 hord two_pow_128_le_n adv q ℓ hq hℓ
+
+end Secp256k1
 
 end Taproot.BIP340Batch
