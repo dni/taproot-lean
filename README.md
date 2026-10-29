@@ -12,6 +12,24 @@ The proofs work over a **concrete secp256k1 curve**, built from Mathlib's ellipt
 
 Repository: <https://github.com/dni/taproot-lean>
 
+## Highlight: BIP340 batch verification with 128-bit randomizers
+
+[sipa/bips#219](https://github.com/sipa/bips/issues/219) and [sipa/bips#222](https://github.com/sipa/bips/pull/222) propose shrinking BIP340's batch-verification randomizers from 256 to 128 bits, which speeds up batch verification in libsecp256k1 by up to about 9%. The pen-and-paper argument there treats the randomizers as independent uniform values. In practice they are derived deterministically from the batch, and with incremental derivation (as in libsecp256k1's batch API) the attacker can pick later entries after seeing earlier randomizers. The PR discussion leaves open whether the argument still applies in that setting.
+
+`Taproot/BIP340Batch.lean` answers this with machine-checked bounds in the random oracle model. Each holds for every choice of the challenge hash:
+
+| Setting | Result | Theorem |
+|---|---|---|
+| Independent uniform `b`-bit randomizers | An invalid signature is caught except with probability `2^-b`. | `batchVerify_sound_bits` |
+| Randomizers hashed from the whole batch (the BIP340 text) | An attacker making `q` hash queries, with batches of at most `ℓ` signatures, gets an invalid batch accepted with probability **at most `(q + ℓ)/2^b`**. | `batch_indexed_sound` |
+| Incremental derivation (randomizer `i` hashes the first `i` entries) | The same bound, **`(q + ℓ)/2^b`**, although the attacker chooses later entries after seeing earlier randomizers. | `batch_incremental_sound` |
+| Both derivations on secp256k1 with `b = 128` | **`(q + ℓ)/2^128`** | `secp256k1_batch_indexed_sound`, `secp256k1_batch_incremental_sound` |
+| Lower bound | An explicit grinding attacker reaches **`1 - (1 - 2^-b)^q ≈ q/2^b`**, so the `q` term is tight. | `batch_indexed_grind` |
+
+What this means for 128-bit randomizers: they are sound, and the only extra cost of deriving them deterministically is offline grinding at one hash per attempt. About `2^64` hash evaluations get an invalid batch accepted with probability about `2^-64`. Whether that margin is acceptable is a judgment for the BIP; the bounds make the trade-off exact.
+
+Assumptions: the seed hash and the CSPRNG are idealized as a random oracle; every point satisfies `n·P = 0` (see [Limitations](#limitations)); the secp256k1 versions use the one `native_decide` computation `n·G = 0`.
+
 ## What is proven
 
 Unless stated otherwise, every result holds for **all** choices of the tagged hash functions. Hashes are modelled as arbitrary functions, so no property of SHA-256 is assumed. Where a result needs a hash to be collision-free, that is an explicit hypothesis. Most results are *correctness* properties: when the parties follow the protocol, everything verifies. The *binding* and *extraction* results go further: they hold for arbitrary, possibly malicious, inputs. Unforgeability itself is not covered (see [Limitations](#limitations)).
@@ -147,6 +165,7 @@ The official test vectors run against the same definitions the theorems are abou
 | BIP350 / Bech32m: all theorems and test vectors | Lean's standard axioms only (`propext`, `Classical.choice`, `Quot.sound`). Fully kernel-checked. |
 | BIP340/341, MuSig2, DLC on secp256k1 | Standard axioms plus **one** `native_decide` computation: `n·G = 0` (`Secp256k1.n_smul_G`). |
 | Generic results (batch verification, numeric DLC decomposition) | Standard axioms only. They hold for any curve satisfying the interface. |
+| Batch verification in the random oracle model (`batch_indexed_sound`, `batch_incremental_sound`, `batch_indexed_grind`) | Standard axioms only; the secp256k1 versions add `n·G = 0`. |
 | BIP340 EUF-CMA (`secp256k1_euf_cma`) | Standard axioms plus `n·G = 0`. VCVio's forking lemma and Fiat-Shamir reduction are fully proven (no `sorry`, no extra axioms). |
 | BIP340 test vectors | Additionally use `native_decide` to run the vectors. |
 
@@ -154,7 +173,7 @@ The official test vectors run against the same definitions the theorems are abou
 
 ## Limitations
 
-- **Unforgeability is proven only for BIP340 signatures**, as a reduction in the random oracle model (`euf_cma`). Its hardness assumption, discrete log on secp256k1, can't be proven, and the reduction's bound is the textbook Pointcheval-Stern one, which loses a factor of roughly `qH`. MuSig2, adaptor signatures and DLCs have no security reductions here. For example, nothing proves that a counterparty can't complete a DLC transaction for an outcome the oracle didn't attest by some means other than the attestation. What *is* proven about adversarial inputs: the robustness results (`verify_adapt`, `extract_of_verify`, `verify_aggregate`), the building blocks of security proofs (non-malleability, special soundness, batch-verification soundness), and the binding results under explicit collision-freeness hypotheses (script-tree binding, outcome binding).
+- **Unforgeability is proven only for BIP340 signatures**, as a reduction in the random oracle model (`euf_cma`). Its hardness assumption, discrete log on secp256k1, can't be proven, and the reduction's bound is the textbook Pointcheval-Stern one, which loses a factor of roughly `qH`. MuSig2, adaptor signatures and DLCs have no security reductions here. For example, nothing proves that a counterparty can't complete a DLC transaction for an outcome the oracle didn't attest by some means other than the attestation. What *is* proven about adversarial inputs: the robustness results (`verify_adapt`, `extract_of_verify`, `verify_aggregate`), the building blocks of security proofs (non-malleability, special soundness), batch-verification soundness against an adaptive attacker in the random oracle model, and the binding results under explicit collision-freeness hypotheses (script-tree binding, outcome binding).
 - **Abstractions.** Hashes are arbitrary functions, transactions are reduced to the signed message, Bitcoin Script is not executed (the 2-of-2 leaf is modelled by what it checks), and byte encodings are left out except in the test-vector files. BIP340's range checks become types (`ZMod n`).
 - **Group order.** Proving that secp256k1 has exactly `n` points (cofactor 1) needs point counting, which isn't done. So the MuSig2 results assume the public keys are multiples of `G`, and batch verification assumes `n·P = 0` for every point (`Curve.PrimeOrder`). Both hold for secp256k1.
 - **MuSig2 details.** The aggregate nonce is assumed non-infinite (the honest case). BIP327's byte-level details (`GetSecondKey`, the key-sorting conventions, nonce generation) are part of the abstract hash functions.
@@ -204,6 +223,7 @@ Taproot/
 - [BIP341](https://github.com/bitcoin/bips/blob/master/bip-0341.mediawiki): Taproot: SegWit version 1 spending rules
 - [BIP327](https://github.com/bitcoin/bips/blob/master/bip-0327.mediawiki): MuSig2 for BIP340-compatible multi-signatures
 - [BIP350](https://github.com/bitcoin/bips/blob/master/bip-0350.mediawiki): Bech32m format for v1+ witness addresses
+- [sipa/bips#219](https://github.com/sipa/bips/issues/219), [sipa/bips#222](https://github.com/sipa/bips/pull/222): reducing BIP340 batch randomizers to 128 bits
 - [DLC specifications](https://github.com/discreetlogcontracts/dlcspecs)
 - Pointcheval, Stern: [Security Arguments for Digital Signatures and Blind Signatures](https://www.di.ens.fr/david.pointcheval/Documents/Papers/2000_joc.pdf) (J. Cryptology, 2000)
 - [VCVio](https://github.com/Verified-zkEVM/VCV-io): formally verified cryptography proofs in Lean 4
