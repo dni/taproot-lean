@@ -65,9 +65,10 @@ In practice the batch coefficients aren't independent random values. They are de
 | `batch_incremental_sound` | **Batch verification is sound in the random oracle model**: an attacker that makes at most `q` oracle queries and outputs batches of at most `ℓ` signatures gets a batch containing an invalid signature accepted with probability at most `(q + ℓ)/2^b` (`2^b ≤ n`). This holds for every choice of the challenge hash. |
 | `batch_indexed_sound` | The same bound, `(q + ℓ)/2^b`, for whole-batch derivation. |
 | `secp256k1_batch_indexed_sound`, `secp256k1_batch_incremental_sound` | Both bounds on secp256k1 with 128-bit coefficients: `(q + ℓ)/2^128`. |
+| `batch_indexed_grind` | **The bound is tight up to the `ℓ` term**: from any valid signature, an explicit grinding attacker making `q` hash queries and outputting 2-signature batches gets an invalid batch accepted with probability at least `1 - (1 - 2^-b)^q` (about `q/2^b` while `q ≪ 2^b`), against the upper bound `(q + 2)/2^b`. |
 | `prEvent_bad_le` | A generic random-oracle bad-event bound with a potential. It allows one fresh answer to complete several bad candidates, as long as earlier queries paid for them. |
 
-The `q` term is inherent to deterministic coefficients: an attacker can grind batches offline, at one hash per try. With 128-bit coefficients, about `2^64` hash evaluations already give success probability about `2^-64`.
+The `q` term is inherent to deterministic coefficients, and `batch_indexed_grind` proves it: an attacker can grind batches offline, at one hash per try. With 128-bit coefficients, about `2^64` hash evaluations already give success probability about `2^-64`.
 
 Proof idea (incremental): cut the winning batch after its last invalid signature. That prefix still passes, and its equation involves only coefficients of its own prefixes. The last of those to be answered must hit the single value that solves the equation. One fresh answer can complete many cached extensions of the queried prefix, but each cached prefix is completed only once, so the total stays at one bad value per query. Whole-batch derivation is simpler: one fresh answer completes at most one batch.
 

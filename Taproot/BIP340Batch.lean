@@ -724,6 +724,207 @@ theorem batch_indexed_sound [UniformAnswerMeasure (IndexSpec n X M b)]
   exact (prEvent_mono_of_support _ _ _ fun z hz hw =>
     Indexed.wins_bad C challenge b hord adv z hz hw).trans hmain
 
+/-! ## The `q` term is necessary: grinding
+
+The bound `(q + ℓ)/2^b` cannot drop its `q`: an attacker who simply tries
+batches wins with probability `1 - (1 - 2^-b)^q`, which is about `q/2^b` while
+`q ≪ 2^b`. From one valid signature `(pk, m, r, s)`, the batch
+`[(pk, m, r, s - δ), (pk, m, r, s + δ)]` has defects `-δ·G` and `δ·G`, so it
+passes exactly when its second coefficient is `1`. The attacker hashes these
+batches for `δ = 1, …, q` and outputs the first whose coefficient is `1`. -/
+
+namespace Grind
+
+/-- Signature `v` with `s` shifted by `d`. -/
+def tweak (v : Entry n X M) (d : ZMod n) : Entry n X M := { v with s := v.s + d }
+
+/-- The `δ`-th candidate batch: two shifted copies of `v`. -/
+def cand (v : Entry n X M) (δ : ℕ) : List (Entry n X M) :=
+  [tweak v (-(δ : ZMod n)), tweak v δ]
+
+/-- The grinding attacker with `k` hash queries left. -/
+def grind (v : Entry n X M) (ht : 1 < 2 ^ b) :
+    ℕ → OracleComp (IndexSpec n X M b) (List (Entry n X M))
+  | 0 => pure (cand v 1)
+  | k + 1 => do
+    let h ← (liftM ((IndexSpec n X M b).query (cand v (k + 1), 1)) :
+      OracleComp (IndexSpec n X M b) (Fin (2 ^ b)))
+    if h = ⟨1, ht⟩ then pure (cand v (k + 1)) else grind v ht k
+
+/-- The attacker found a candidate whose coefficient is `1`. -/
+def Found (v : Entry n X M) (ht : 1 < 2 ^ b)
+    (z : List (Entry n X M) × (IndexSpec n X M b).QueryCache) : Prop :=
+  ∃ δ, 0 < δ ∧ δ < n ∧ z.1 = cand v δ ∧ z.2 (cand v δ, 1) = some ⟨1, ht⟩
+
+omit [DecidableEq M] in
+theorem tweak_defect {v : Entry n X M} (hv : valid C challenge v = true) (d : ZMod n) :
+    defect C challenge (tweak v d) = C.mulG d := by
+  have h0 := ((valid_iff C challenge v).mp hv).2.2
+  have : defect C challenge (tweak v d) = defect C challenge v + C.mulG d := by
+    simp only [defect, tweak, R, P, e, map_add]
+    abel
+  rw [this, h0, zero_add]
+
+omit [DecidableEq M] in
+theorem tweak_invalid {v : Entry n X M} (hv : valid C challenge v = true) {d : ZMod n}
+    (hd : d ≠ 0) : valid C challenge (tweak v d) = false := by
+  cases h : valid C challenge (tweak v d)
+  · rfl
+  · have := ((valid_iff C challenge _).mp h).2.2
+    rw [tweak_defect C challenge hv] at this
+    exact absurd (C.mulG_eq_zero.mp this) hd
+
+omit [DecidableEq M] in
+/-- A candidate batch passes when both its coefficients are `1`. -/
+theorem cand_pass (hord : PrimeOrder n E) {v : Entry n X M} (hv : valid C challenge v = true)
+    (d : ZMod n) (ent : Fin 2 → Entry n X M) (h0 : ent 0 = tweak v (-d))
+    (h1 : ent 1 = tweak v d) (a : Fin 2 → ZMod n) (ha0 : a 0 = 1) (ha1 : a 1 = 1) :
+    batchVerify C challenge ent a = true := by
+  have : Fact (1 < n) := ⟨(Fact.out : n.Prime).one_lt⟩
+  have hlift := (valid_iff C challenge v).mp hv
+  rw [batchVerify_iff C challenge hord]
+  refine ⟨Fin.forall_fin_two.mpr ⟨?_, ?_⟩, ?_⟩
+  · rw [h0]; exact ⟨hlift.1, hlift.2.1⟩
+  · rw [h1]; exact ⟨hlift.1, hlift.2.1⟩
+  · rw [Fin.sum_univ_two, h0, h1, ha0, ha1, tweak_defect C challenge hv,
+      tweak_defect C challenge hv, ZMod.val_one, one_smul, one_smul, map_neg, neg_add_cancel]
+
+omit [DecidableEq E] [DecidableEq X] [DecidableEq M] in
+theorem cand_inj (v : Entry n X M) {δ δ' : ℕ} (hδ : δ < n) (hδ' : δ' < n)
+    (h : cand v δ = cand v δ') : δ = δ' := by
+  have h2 := congrArg (fun L : List (Entry n X M) => (L.getD 1 v).s) h
+  simp only [cand, tweak, List.getD_cons_succ, List.getD_cons_zero, add_right_inj] at h2
+  rwa [ZMod.natCast_eq_natCast_iff', Nat.mod_eq_of_lt hδ, Nat.mod_eq_of_lt hδ'] at h2
+
+omit [AddCommGroup E] [DecidableEq E] [DecidableEq X] [DecidableEq M] in
+theorem grind_bound (v : Entry n X M) (ht : 1 < 2 ^ b) (k : ℕ) :
+    IsTotalQueryBound (grind b v ht k) k := by
+  induction k with
+  | zero => trivial
+  | succ k ih =>
+    rw [grind, isTotalQueryBound_query_bind_iff]
+    refine ⟨Nat.succ_pos k, fun u => ?_⟩
+    split_ifs
+    · trivial
+    · exact ih
+
+omit [AddCommGroup E] [DecidableEq E] [DecidableEq X] [DecidableEq M] in
+theorem grind_length (v : Entry n X M) (ht : 1 < 2 ^ b) (k : ℕ) :
+    ∀ L ∈ support (grind b v ht k), L.length = 2 := by
+  induction k with
+  | zero => intro L hL; simp only [grind, support_pure, Set.mem_singleton_iff] at hL; subst hL; rfl
+  | succ k ih =>
+    intro L hL
+    rw [grind, mem_support_bind_iff] at hL
+    obtain ⟨u, -, hL⟩ := hL
+    split_ifs at hL
+    · simp only [support_pure, Set.mem_singleton_iff] at hL; subst hL; rfl
+    · exact ih L hL
+
+/-- **The attacker misses with probability at most `(1 - 2^-b)^k`**, as long
+as none of its `k` candidates has been hashed yet. -/
+theorem grind_miss [UniformAnswerMeasure (IndexSpec n X M b)] (v : Entry n X M)
+    (ht : 1 < 2 ^ b) (k : ℕ) (hk : k < n) (c : (IndexSpec n X M b).QueryCache)
+    (hc : ∀ δ, 0 < δ → δ ≤ k → c (cand v δ, 1) = none) :
+    Pr{let z ← (simulateQ (IndexSpec n X M b).cachingOracle (grind b v ht k)).run c}[
+      ¬ Found b v ht z] ≤ (((2 ^ b - 1 : ℕ) : ℝ≥0∞) / (2 ^ b : ℕ)) ^ k := by
+  induction k generalizing c with
+  | zero => rw [pow_zero]; exact prEvent_le_one _
+  | succ k ih =>
+    rw [grind, simulateQ_bind, cachingOracle.simulateQ_query, StateT.run_bind,
+      cachingOracle.run_none (hc (k + 1) (Nat.succ_pos k) le_rfl), bind_map_left,
+      prEvent_bind_eq_sum_fintype]
+    have hq : ∀ u : Fin (2 ^ b), Pr{let x ← (liftM ((IndexSpec n X M b).query
+        (cand v (k + 1), 1)) : OracleComp (IndexSpec n X M b) (Fin (2 ^ b)))}[x = u] =
+          ((2 ^ b : ℕ) : ℝ≥0∞)⁻¹ := fun u => by
+      refine (prEvent_liftM_query_eq_card_div (spec := IndexSpec n X M b) _ (· = u)).trans ?_
+      simp [Finset.filter_eq', one_div]
+    set B := (((2 ^ b - 1 : ℕ) : ℝ≥0∞) / (2 ^ b : ℕ)) with hB
+    let tgt : Fin (2 ^ b) := ⟨1, ht⟩
+    calc _ ≤ ∑ u : Fin (2 ^ b), (if u = tgt then 0 else ((2 ^ b : ℕ) : ℝ≥0∞)⁻¹ * B ^ k) := by
+          refine Finset.sum_le_sum fun u _ => ?_
+          rw [hq u]
+          by_cases hu : u = tgt
+          · subst hu
+            simp only [tgt, ↓reduceIte, simulateQ_pure, StateT.run_pure]
+            refine le_of_eq (mul_eq_zero_of_right _
+              (prEvent_eq_zero_of_forall_mem_support _ _ fun z hz hnf => hnf ?_))
+            rw [support_pure, Set.mem_singleton_iff] at hz
+            subst hz
+            exact ⟨k + 1, Nat.succ_pos k, hk, rfl, QueryCache.cacheQuery_self _ _ _⟩
+          · simp only [tgt] at hu
+            simp only [tgt, hu, ↓reduceIte]
+            gcongr
+            refine ih (by omega) _ fun δ hδ hδk => ?_
+            have hne : ((cand v δ, 1) : List (Entry n X M) × ℕ) ≠ (cand v (k + 1), 1) :=
+              fun h => by
+                have := cand_inj v (by omega) hk (Prod.mk.inj h).1
+                omega
+            rw [QueryCache.cacheQuery_of_ne _ _ hne]
+            exact hc δ hδ (by omega)
+      _ = ((2 ^ b - 1 : ℕ) : ℝ≥0∞) * (((2 ^ b : ℕ) : ℝ≥0∞)⁻¹ * B ^ k) := by
+          rw [← Finset.add_sum_erase _ _ (Finset.mem_univ tgt),
+            ite_eq_left_of_eq_true _ _ (eq_true rfl), zero_add, Finset.sum_congr rfl fun u hu =>
+              ite_eq_right_of_eq_false _ _ (eq_false (Finset.ne_of_mem_erase hu)),
+            Finset.sum_const, Finset.card_erase_of_mem (Finset.mem_univ _), Finset.card_univ,
+            Fintype.card_fin, nsmul_eq_mul]
+      _ = B ^ (k + 1) := by
+          rw [pow_succ]
+          simp only [hB, div_eq_mul_inv]
+          ring
+
+end Grind
+
+open Grind in
+/-- **Grinding matches the bound**: from any valid signature `v`, the
+attacker `grind`, which makes `q` hash queries and outputs batches of two
+signatures, gets a batch containing an invalid signature accepted with
+probability at least `1 - (1 - 2^-b)^q`. Compare `batch_indexed_sound`'s upper
+bound `(q + 2)/2^b`. -/
+theorem batch_indexed_grind [UniformAnswerMeasure (IndexSpec n X M b)]
+    (hord : PrimeOrder n E) (ht : 1 < 2 ^ b) {v : Entry n X M}
+    (hv : valid C challenge v = true) (q : ℕ) (hq : q < n) :
+    1 - (((2 ^ b - 1 : ℕ) : ℝ≥0∞) / (2 ^ b : ℕ)) ^ q ≤
+      Pr{let z ← (simulateQ (IndexSpec n X M b).cachingOracle
+        (batchGame b indexKey (grind b v ht q))).run ∅}[Wins C challenge z.1] := by
+  have hmiss := grind_miss b v ht q hq ∅ fun _ _ _ => rfl
+  have hfound : 1 - (((2 ^ b - 1 : ℕ) : ℝ≥0∞) / (2 ^ b : ℕ)) ^ q ≤
+      Pr{let z ← (simulateQ (IndexSpec n X M b).cachingOracle (grind b v ht q)).run ∅}[
+        Found b v ht z] :=
+    calc _ ≤ 1 - Pr{let z ← (simulateQ (IndexSpec n X M b).cachingOracle
+          (grind b v ht q)).run ∅}[¬ Found b v ht z] := tsub_le_tsub_left hmiss 1
+      _ = _ := by
+        rw [prEvent_not_eq_one_sub, ENNReal.sub_sub_cancel ENNReal.one_ne_top (prEvent_le_one _)]
+  unfold batchGame
+  rw [simulateQ_bind, StateT.run_bind]
+  refine le_trans hfound ?_
+  rw [← mul_one (Pr{let z ← (simulateQ (IndexSpec n X M b).cachingOracle
+    (grind b v ht q)).run ∅}[Found b v ht z])]
+  refine mul_le_prEvent_bind_of_forall _ _ (Found b v ht) _ le_rfl
+    fun x hx => (prEvent_eq_one_of_forall_mem_support _ _ fun z hz => ?_).ge
+  obtain ⟨L, c⟩ := x
+  obtain ⟨δ, hδ, hδn, rfl, hcδ⟩ := hx
+  rw [simulateQ_bind, StateT.run_bind, mem_support_bind_iff] at hz
+  obtain ⟨⟨as, c₂⟩, h₂, hz⟩ := hz
+  simp only [simulateQ_pure, StateT.run_pure, support_pure, Set.mem_singleton_iff] at hz
+  subst hz
+  have hco := coeffs_spec b indexKey (cand v δ) _ c (as, c₂) h₂
+  have hle := simulateQ_cachingOracle_cache_le _ c _ h₂
+  have ha0 : as.getD 0 0 = 1 := by simpa using (hco 0 (by simp [cand])).1 (by simp)
+  have ha1 : as.getD 1 0 = 1 := by
+    obtain ⟨h, hc, ha⟩ := (hco 1 (by simp [cand])).2 (by simp [cand])
+    have hc' : c₂ (cand v δ, 1) = some h := by
+      rw [List.getElem_range] at hc
+      exact hc
+    rw [hle hcδ, Option.some.injEq] at hc'
+    simpa [← hc'] using ha
+  have hδ0 : (δ : ZMod n) ≠ 0 := fun h => by
+    have := congrArg ZMod.val h
+    rw [ZMod.val_natCast, ZMod.val_zero, Nat.mod_eq_of_lt hδn] at this
+    omega
+  refine ⟨cand_pass C challenge hord hv δ (cand v δ).get rfl rfl _ (by simpa using ha0)
+    (by simpa using ha1), ⟨1, by simp [cand]⟩, tweak_invalid C challenge hv hδ0⟩
+
 end Indexed
 
 /-! ## On secp256k1 with 128-bit coefficients -/

@@ -221,6 +221,7 @@ end Taproot
 #print axioms Taproot.BIP340.batchVerify_sound_bits
 #print axioms Taproot.BIP340Batch.batch_incremental_sound
 #print axioms Taproot.BIP340Batch.batch_indexed_sound
+#print axioms Taproot.BIP340Batch.batch_indexed_grind
 #print axioms Taproot.BIP340Batch.secp256k1_batch_incremental_sound
 #print axioms Taproot.BIP340Batch.secp256k1_batch_indexed_sound
 #print axioms Bech32.verify_createChecksum
