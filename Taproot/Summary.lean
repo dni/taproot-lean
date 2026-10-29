@@ -1,5 +1,7 @@
 import Taproot.MuSig2
 import Taproot.BIP340Props
+import Taproot.BIP340Security
+import Taproot.BIP340Batch
 import Taproot.DLCNumeric
 import Taproot.BIP350
 import Taproot.BIP340Vectors
@@ -175,6 +177,28 @@ theorem secp256k1_dlc_wrong_outcome {osk : ZMod n} {opk r pk : F} {m m' msg : M}
     verify secp256k1 challenge pk msg (adapt secp256k1 ps s) = false :=
   verify_adapt_wrong_outcome secp256k1 challenge hopk hS hpre hatt hne
 
+open OracleComp in
+/-- **BIP340 on secp256k1 is EUF-CMA secure in the random oracle model**,
+assuming key recovery for random public keys is hard: from any forger with
+success probability `ε` making at most `qS` signing and `qH` hash queries, the
+reduction recovers the secret key with probability at least
+`ε' · (ε' / (qH + 1) - 1/n)`, where `ε' = ε - qS · (qS + qH) · 2/(n - 1)`. -/
+theorem secp256k1_euf_cma (M' : Type) [DecidableEq M']
+    (adv : SignatureAlg.UnforgeableAdversary
+      (FiatShamir.inROM (BIP340Security.sigma secp256k1) (BIP340Security.keyGen secp256k1) M'))
+    (qS qH : ℕ)
+    (hQ : ∀ pk, FiatShamir.signHashQueryBound (M := M') (Commit := F) (Chal := ZMod n)
+      (S' := F × ZMod n) (oa := adv.main pk) qS qH) :
+    let eps := SignatureAlg.unforgeableAdvantage
+        (FiatShamir.runtime (Commit := F) (Chal := ZMod n) M') adv -
+      (qS : ENNReal) * (qS + qH) * (2 / ((n - 1 : ℕ) : ENNReal))
+    eps * (eps / (qH + 1 : ENNReal) - FiatShamir.challengeSpaceInv (ZMod n)) ≤
+      Pr{let x ← (hardRelationExperiment (BIP340Security.keyGen secp256k1)
+        (FiatShamir.cmaReduction (BIP340Security.sigma secp256k1)
+          (BIP340Security.keyGen secp256k1) M' (BIP340Security.simTranscript secp256k1)
+          adv qH))}[x = true] :=
+  BIP340Security.euf_cma secp256k1 M' adv qS qH hQ
+
 end Taproot
 
 /-! ## What the proofs rely on -/
@@ -187,12 +211,19 @@ end Taproot
 #print axioms Taproot.secp256k1_oracle_nonce_reuse
 #print axioms Taproot.secp256k1_musig2_sound
 #print axioms Taproot.secp256k1_dlc_settle_keyPath
+#print axioms Taproot.secp256k1_euf_cma
 #print axioms Taproot.secp256k1_schnorr_unique
 #print axioms Taproot.secp256k1_schnorr_extract
 #print axioms Taproot.secp256k1_taproot_scriptPath_binding
 #print axioms Taproot.secp256k1_dlc_wrong_outcome
 #print axioms Taproot.DLC.Numeric.numeric_settle
 #print axioms Taproot.BIP340.batchVerify_sound
+#print axioms Taproot.BIP340.batchVerify_sound_bits
+#print axioms Taproot.BIP340Batch.batch_incremental_sound
+#print axioms Taproot.BIP340Batch.batch_indexed_sound
+#print axioms Taproot.BIP340Batch.batch_indexed_grind
+#print axioms Taproot.BIP340Batch.secp256k1_batch_incremental_sound
+#print axioms Taproot.BIP340Batch.secp256k1_batch_indexed_sound
 #print axioms Bech32.verify_createChecksum
 #print axioms Bech32.verifyChecksum_substitution
 #print axioms Bech32.bech32m_q_insertion_detected

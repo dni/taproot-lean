@@ -3,6 +3,8 @@ import Taproot.Primes
 import Taproot.Curve
 import Taproot.BIP340
 import Taproot.BIP340Props
+import Taproot.BIP340Security
+import Taproot.BIP340Batch
 import Taproot.BIP341
 import Taproot.Secp256k1
 import Taproot.DLC

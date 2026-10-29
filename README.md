@@ -1,6 +1,6 @@
 # taproot-lean
 
-Machine-checked proofs, in [Lean 4](https://lean-lang.org) with [Mathlib](https://github.com/leanprover-community/mathlib4), about the cryptography behind Bitcoin's Taproot upgrade:
+Machine-checked proofs, in [Lean 4](https://lean-lang.org) with [Mathlib](https://github.com/leanprover-community/mathlib4) and [VCVio](https://github.com/Verified-zkEVM/VCV-io), about the cryptography behind Bitcoin's Taproot upgrade:
 
 - Schnorr signatures (BIP340)
 - Taproot outputs (BIP341)
@@ -30,7 +30,47 @@ Unless stated otherwise, every result holds for **all** choices of the tagged ha
 | `sign_nonce_reuse` | So a signer whose nonce repeats across two messages leaks its key. |
 | `batchVerify_of_valid` | BIP340 batch verification accepts every batch of valid signatures, for every choice of coefficients. |
 | `batchVerify_sound` | If one signature is invalid, then once the other coefficients are fixed, at most one value of its coefficient lets the batch pass. A random coefficient catches it except with probability `1/n`. |
+| `batchVerify_sound_bits` | The same with `b`-bit coefficients (`2^b ≤ n`): at most one `b`-bit value of the coefficient lets the batch pass, so 128-bit coefficients catch an invalid signature except with probability `2^-128`. |
 | `batchVerify_sound_single` | A single invalid signature with a nonzero coefficient (e.g. BIP340's fixed `a₁ = 1`) is always caught. |
+
+### BIP340 unforgeability (EUF-CMA) — `Taproot/BIP340Security.lean`
+
+Built on [VCVio](https://github.com/Verified-zkEVM/VCV-io), a Lean framework for cryptographic security proofs with oracle computations, a probability semantics and a forking lemma.
+
+BIP340 signing is the Fiat-Shamir transform of a Σ-protocol: commit to `r = x(k·G)` with an even-y nonce point, receive a challenge `e`, respond with `s = k + e·d`. Its verification check is exactly BIP340's `Verify` (`sigma_verify_eq_verify`).
+
+| Theorem | Statement |
+|---|---|
+| `sigma_speciallySound` | Two accepting transcripts with the same `r` and different challenges reveal the secret key. |
+| `sigma_hvzk` | **Perfect zero knowledge**: transcripts can be simulated without the secret key, with exactly the real distribution. |
+| `sigma_simCommitPredictability` | A simulated `r` hits any fixed value with probability at most `1/|EvenNonce| = 2/(n-1)` (`two_mul_card_evenNonce`). |
+| `normalize_uniform` | BIP340's normalization (`d = d'` or `n - d'`) of a uniform nonzero scalar is uniform over the scalars whose point has an even y. Keys and nonces are generated exactly this way in the model. |
+| `euf_cma` | **BIP340 is unforgeable under chosen-message attacks in the random oracle model**, assuming it is hard to recover the secret key of a random public key: from a forger with success probability `ε` making `qS` signing and `qH` hash queries, VCVio's Pointcheval-Stern reduction recovers the key with probability at least `ε'·(ε'/(qH+1) - 1/n)`, where `ε' = ε - qS·(qS+qH)·2/(n-1)`. |
+| `secp256k1_euf_cma` | The same bound for secp256k1. |
+
+Modelling choices:
+- The hash is a random oracle on `(message, r)`. BIP340 also hashes the public key into the challenge ("key prefixing"); that matters when an attacker targets many keys at once, not in this single-key experiment.
+- Nonces are uniform nonzero scalars. Real BIP340 derives them from a hash, which a random oracle makes uniform.
+- The hard problem is recovering the secret key of a random BIP340 public key (discrete log for a random even-y point).
+- The bound is the textbook Pointcheval-Stern one. It loses roughly a factor of `qH`, so it doesn't give 128-bit security for secp256k1 by itself; tighter bounds need stronger idealizations (e.g. the algebraic group model).
+
+### BIP340 batch verification with hash-derived coefficients — `Taproot/BIP340Batch.lean`
+
+In practice the batch coefficients aren't independent random values. They are derived deterministically from the batch, and the attacker picks the batch. This file models them as a random oracle, in two ways:
+- **Whole-batch derivation**, as in the BIP340 text (a seed hashing every input, expanded by a CSPRNG): the coefficient of signature `i ≥ 2` is a `b`-bit hash of `(batch, i)`.
+- **Incremental derivation**, as in libsecp256k1's batch API: the coefficient of signature `i ≥ 2` is a `b`-bit hash of the first `i` entries, so the attacker can choose later entries after seeing earlier coefficients.
+
+| Theorem | Statement |
+|---|---|
+| `batch_incremental_sound` | **Batch verification is sound in the random oracle model**: an attacker that makes at most `q` oracle queries and outputs batches of at most `ℓ` signatures gets a batch containing an invalid signature accepted with probability at most `(q + ℓ)/2^b` (`2^b ≤ n`). This holds for every choice of the challenge hash. |
+| `batch_indexed_sound` | The same bound, `(q + ℓ)/2^b`, for whole-batch derivation. |
+| `secp256k1_batch_indexed_sound`, `secp256k1_batch_incremental_sound` | Both bounds on secp256k1 with 128-bit coefficients: `(q + ℓ)/2^128`. |
+| `batch_indexed_grind` | **The bound is tight up to the `ℓ` term**: from any valid signature, an explicit grinding attacker making `q` hash queries and outputting 2-signature batches gets an invalid batch accepted with probability at least `1 - (1 - 2^-b)^q` (about `q/2^b` while `q ≪ 2^b`), against the upper bound `(q + 2)/2^b`. |
+| `prEvent_bad_le` | A generic random-oracle bad-event bound with a potential. It allows one fresh answer to complete several bad candidates, as long as earlier queries paid for them. |
+
+The `q` term is inherent to deterministic coefficients, and `batch_indexed_grind` proves it: an attacker can grind batches offline, at one hash per try. With 128-bit coefficients, about `2^64` hash evaluations already give success probability about `2^-64`.
+
+Proof idea (incremental): cut the winning batch after its last invalid signature. That prefix still passes, and its equation involves only coefficients of its own prefixes. The last of those to be answered must hit the single value that solves the equation. One fresh answer can complete many cached extensions of the queried prefix, but each cached prefix is completed only once, so the total stays at one bad value per query. Whole-batch derivation is simpler: one fresh answer completes at most one batch.
 
 ### BIP341: Taproot — `Taproot/BIP341.lean`
 | Theorem | Statement |
@@ -107,13 +147,14 @@ The official test vectors run against the same definitions the theorems are abou
 | BIP350 / Bech32m: all theorems and test vectors | Lean's standard axioms only (`propext`, `Classical.choice`, `Quot.sound`). Fully kernel-checked. |
 | BIP340/341, MuSig2, DLC on secp256k1 | Standard axioms plus **one** `native_decide` computation: `n·G = 0` (`Secp256k1.n_smul_G`). |
 | Generic results (batch verification, numeric DLC decomposition) | Standard axioms only. They hold for any curve satisfying the interface. |
+| BIP340 EUF-CMA (`secp256k1_euf_cma`) | Standard axioms plus `n·G = 0`. VCVio's forking lemma and Fiat-Shamir reduction are fully proven (no `sorry`, no extra axioms). |
 | BIP340 test vectors | Additionally use `native_decide` to run the vectors. |
 
 `native_decide` trusts Lean's compiler in addition to its kernel. Every other computation, including all primality certificates, is checked by the kernel.
 
 ## Limitations
 
-- **No unforgeability proofs.** Nothing here relies on a hardness assumption such as discrete log, and there are no probabilistic reductions. For example, nothing proves that a counterparty can't complete a DLC transaction for an outcome the oracle didn't attest by some means other than the attestation. What *is* proven about adversarial inputs: the robustness results (`verify_adapt`, `extract_of_verify`, `verify_aggregate`), the building blocks of security proofs (non-malleability, special soundness, batch-verification soundness), and the binding results under explicit collision-freeness hypotheses (script-tree binding, outcome binding).
+- **Unforgeability is proven only for BIP340 signatures**, as a reduction in the random oracle model (`euf_cma`). Its hardness assumption, discrete log on secp256k1, can't be proven, and the reduction's bound is the textbook Pointcheval-Stern one, which loses a factor of roughly `qH`. MuSig2, adaptor signatures and DLCs have no security reductions here. For example, nothing proves that a counterparty can't complete a DLC transaction for an outcome the oracle didn't attest by some means other than the attestation. What *is* proven about adversarial inputs: the robustness results (`verify_adapt`, `extract_of_verify`, `verify_aggregate`), the building blocks of security proofs (non-malleability, special soundness, batch-verification soundness), and the binding results under explicit collision-freeness hypotheses (script-tree binding, outcome binding).
 - **Abstractions.** Hashes are arbitrary functions, transactions are reduced to the signed message, Bitcoin Script is not executed (the 2-of-2 leaf is modelled by what it checks), and byte encodings are left out except in the test-vector files. BIP340's range checks become types (`ZMod n`).
 - **Group order.** Proving that secp256k1 has exactly `n` points (cofactor 1) needs point counting, which isn't done. So the MuSig2 results assume the public keys are multiples of `G`, and batch verification assumes `n·P = 0` for every point (`Curve.PrimeOrder`). Both hold for secp256k1.
 - **MuSig2 details.** The aggregate nonce is assumed non-infinite (the honest case). BIP327's byte-level details (`GetSecondKey`, the key-sorting conventions, nonce generation) are part of the abstract hash functions.
@@ -130,7 +171,7 @@ lake exe cache get   # download prebuilt Mathlib (several GB)
 lake build
 ```
 
-Building the project itself takes a few minutes after the Mathlib cache is downloaded. The build succeeding means every proof has been checked.
+After the Mathlib cache is downloaded, the first build also compiles the needed parts of [VCVio](https://github.com/Verified-zkEVM/VCV-io) (about 3,000 files, which has no prebuilt cache), which can take an hour or more. Later builds take a few minutes. The build succeeding means every proof has been checked.
 
 **Troubleshooting (Linux):** if the build fails with `undefined symbol` errors from Lean's bundled `clang`, your environment probably sets `LD_LIBRARY_PATH` to the system library directories, so the toolchain loads the system LLVM. Run `env -u LD_LIBRARY_PATH lake build`.
 
@@ -141,6 +182,8 @@ Taproot/
   Curve.lean          the curve interface the protocols are proven against
   BIP340.lean         Schnorr signatures
   BIP340Props.lean    non-malleability, key extraction, batch verification
+  BIP340Security.lean EUF-CMA unforgeability in the random oracle model (via VCVio)
+  BIP340Batch.lean    batch verification soundness with hash-derived coefficients (ROM)
   BIP341.lean         Taproot: key tweaking, key path, script trees
   DLC.lean            oracle attestations, Schnorr adaptor signatures, outcome binding,
                       script-path settlement
@@ -162,3 +205,5 @@ Taproot/
 - [BIP327](https://github.com/bitcoin/bips/blob/master/bip-0327.mediawiki): MuSig2 for BIP340-compatible multi-signatures
 - [BIP350](https://github.com/bitcoin/bips/blob/master/bip-0350.mediawiki): Bech32m format for v1+ witness addresses
 - [DLC specifications](https://github.com/discreetlogcontracts/dlcspecs)
+- Pointcheval, Stern: [Security Arguments for Digital Signatures and Blind Signatures](https://www.di.ens.fr/david.pointcheval/Documents/Papers/2000_joc.pdf) (J. Cryptology, 2000)
+- [VCVio](https://github.com/Verified-zkEVM/VCV-io): formally verified cryptography proofs in Lean 4
