@@ -34,8 +34,8 @@ batch passes while containing an invalid signature with probability at most
 For whole-batch derivation one fresh answer can complete at most one batch,
 which gives the bound directly. The incremental case needs more care.
 
-For incremental derivation, the proof charges each win to a random oracle answer. Let `j` be the last
-invalid entry of the winning batch. Then the prefix `t` of the first `j`
+For incremental derivation, the proof charges each win to a random oracle
+answer. Let `j` be the last invalid entry of the winning batch. Then the prefix `t` of the first `j`
 entries already passes, and its equation `Σ aᵢ·defectᵢ = 0` involves only
 coefficients of prefixes of `t`. Whichever of those (with a nonzero defect) is
 answered last must hit the one value that solves the equation. One fresh
