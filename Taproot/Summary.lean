@@ -187,10 +187,10 @@ theorem secp256k1_euf_cma (M' : Type) [DecidableEq M']
     (adv : SignatureAlg.UnforgeableAdversary
       (FiatShamir.inROM (BIP340Security.sigma secp256k1) (BIP340Security.keyGen secp256k1) M'))
     (qS qH : ℕ)
-    (hQ : ∀ pk, FiatShamir.signHashQueryBound (M := M') (Commit := F) (Chal := ZMod n)
-      (S' := F × ZMod n) (oa := adv.main pk) qS qH) :
+    (hQ : ∀ pk, FiatShamir.signHashQueryBound (M := M') (Commit := F × F) (Chal := ZMod n)
+      (S' := (F × F) × ZMod n) (oa := adv.main pk) qS qH) :
     let eps := SignatureAlg.unforgeableAdvantage
-        (FiatShamir.runtime (Commit := F) (Chal := ZMod n) M') adv -
+        (FiatShamir.runtime (Commit := F × F) (Chal := ZMod n) M') adv -
       (qS : ENNReal) * (qS + qH) * (2 / ((n - 1 : ℕ) : ENNReal))
     eps * (eps / (qH + 1 : ENNReal) - FiatShamir.challengeSpaceInv (ZMod n)) ≤
       Pr{let x ← (hardRelationExperiment (BIP340Security.keyGen secp256k1)
@@ -198,6 +198,27 @@ theorem secp256k1_euf_cma (M' : Type) [DecidableEq M']
           (BIP340Security.keyGen secp256k1) M' (BIP340Security.simTranscript secp256k1)
           adv qH))}[x = true] :=
   BIP340Security.euf_cma secp256k1 M' adv qS qH hQ
+
+open OracleComp in
+/-- **BIP340 on secp256k1 is EUF-CMA secure under the discrete-log assumption**,
+in the random oracle model: the same bound as `secp256k1_euf_cma`, for a
+discrete-log solver built from the forger. -/
+theorem secp256k1_euf_cma_dlog (M' : Type) [DecidableEq M']
+    (adv : SignatureAlg.UnforgeableAdversary
+      (FiatShamir.inROM (BIP340Security.sigma secp256k1) (BIP340Security.keyGen secp256k1) M'))
+    (qS qH : ℕ)
+    (hQ : ∀ pk, FiatShamir.signHashQueryBound (M := M') (Commit := F × F) (Chal := ZMod n)
+      (S' := (F × F) × ZMod n) (oa := adv.main pk) qS qH) :
+    let eps := SignatureAlg.unforgeableAdvantage
+        (FiatShamir.runtime (Commit := F × F) (Chal := ZMod n) M') adv -
+      (qS : ENNReal) * (qS + qH) * (2 / ((n - 1 : ℕ) : ENNReal))
+    eps * (eps / (qH + 1 : ENNReal) - FiatShamir.challengeSpaceInv (ZMod n)) ≤
+      Pr{let x ← (BIP340Security.dlogExperiment secp256k1
+        (BIP340Security.dlogOfKeyRecovery secp256k1
+          (FiatShamir.cmaReduction (BIP340Security.sigma secp256k1)
+            (BIP340Security.keyGen secp256k1) M' (BIP340Security.simTranscript secp256k1)
+            adv qH)))}[x = true] :=
+  BIP340Security.euf_cma_dlog secp256k1 M' adv qS qH hQ
 
 end Taproot
 
@@ -212,6 +233,7 @@ end Taproot
 #print axioms Taproot.secp256k1_musig2_sound
 #print axioms Taproot.secp256k1_dlc_settle_keyPath
 #print axioms Taproot.secp256k1_euf_cma
+#print axioms Taproot.secp256k1_euf_cma_dlog
 #print axioms Taproot.secp256k1_schnorr_unique
 #print axioms Taproot.secp256k1_schnorr_extract
 #print axioms Taproot.secp256k1_taproot_scriptPath_binding

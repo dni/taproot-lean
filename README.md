@@ -55,7 +55,7 @@ Unless stated otherwise, every result holds for **all** choices of the tagged ha
 
 Built on [VCVio](https://github.com/Verified-zkEVM/VCV-io), a Lean framework for cryptographic security proofs with oracle computations, a probability semantics and a forking lemma.
 
-BIP340 signing is the Fiat-Shamir transform of a Σ-protocol: commit to `r = x(k·G)` with an even-y nonce point, receive a challenge `e`, respond with `s = k + e·d`. Its verification check is exactly BIP340's `Verify` (`sigma_verify_eq_verify`).
+BIP340 signing is the Fiat-Shamir transform of a Σ-protocol: commit to `(r, p)`, with `r = x(k·G)` for an even-y nonce point and `p = x(P)` the public key, receive a challenge `e`, respond with `s = k + e·d`. Since `p` is part of the commitment, the challenge hash gets exactly BIP340's inputs `r ‖ p ‖ m`. Its verification check is exactly BIP340's `Verify` (`sigma_verify_eq_verify`), and commitments carrying a different key are rejected (`sigma_verify_wrong_key`).
 
 | Theorem | Statement |
 |---|---|
@@ -64,12 +64,13 @@ BIP340 signing is the Fiat-Shamir transform of a Σ-protocol: commit to `r = x(k
 | `sigma_simCommitPredictability` | A simulated `r` hits any fixed value with probability at most `1/|EvenNonce| = 2/(n-1)` (`two_mul_card_evenNonce`). |
 | `normalize_uniform` | BIP340's normalization (`d = d'` or `n - d'`) of a uniform nonzero scalar is uniform over the scalars whose point has an even y. Keys and nonces are generated exactly this way in the model. |
 | `euf_cma` | **BIP340 is unforgeable under chosen-message attacks in the random oracle model**, assuming it is hard to recover the secret key of a random public key: from a forger with success probability `ε` making `qS` signing and `qH` hash queries, VCVio's Pointcheval-Stern reduction recovers the key with probability at least `ε'·(ε'/(qH+1) - 1/n)`, where `ε' = ε - qS·(qS+qH)·2/(n-1)`. |
-| `secp256k1_euf_cma` | The same bound for secp256k1. |
+| `euf_cma_dlog` | The same bound with the key-recovery algorithm turned into a solver for discrete log of `k·G`, `k` uniform nonzero. |
+| `secp256k1_euf_cma`, `secp256k1_euf_cma_dlog` | Both bounds for secp256k1. |
 
 Modelling choices:
-- The hash is a random oracle on `(message, r)`. BIP340 also hashes the public key into the challenge ("key prefixing"); that matters when an attacker targets many keys at once, not in this single-key experiment.
+- The hash is a random oracle on `(message, (r, p))`, i.e. BIP340's challenge inputs including the public key ("key prefixing"). The experiment is single-key, so the multi-key benefit of key prefixing is not captured.
 - Nonces are uniform nonzero scalars. Real BIP340 derives them from a hash, which a random oracle makes uniform.
-- The hard problem is recovering the secret key of a random BIP340 public key (discrete log for a random even-y point).
+- The hard problem in `euf_cma` is recovering the secret key of a random BIP340 public key (discrete log for a random even-y point). `euf_cma_dlog` reduces this to plain discrete log of `k·G` for a uniform nonzero `k`.
 - The bound is the textbook Pointcheval-Stern one. It loses roughly a factor of `qH`, so it doesn't give 128-bit security for secp256k1 by itself; tighter bounds need stronger idealizations (e.g. the algebraic group model).
 
 ### BIP340 batch verification with hash-derived coefficients — `Taproot/BIP340Batch.lean`
@@ -83,10 +84,10 @@ In practice the batch coefficients aren't independent random values. They are de
 | `batch_incremental_sound` | **Batch verification is sound in the random oracle model**: an attacker that makes at most `q` oracle queries and outputs batches of at most `ℓ` signatures gets a batch containing an invalid signature accepted with probability at most `(q + ℓ)/2^b` (`2^b ≤ n`). This holds for every choice of the challenge hash. |
 | `batch_indexed_sound` | The same bound, `(q + ℓ)/2^b`, for whole-batch derivation. |
 | `secp256k1_batch_indexed_sound`, `secp256k1_batch_incremental_sound` | Both bounds on secp256k1 with 128-bit coefficients: `(q + ℓ)/2^128`. |
-| `batch_indexed_grind` | **The bound is tight up to the `ℓ` term**: from any valid signature, an explicit grinding attacker making `q` hash queries and outputting 2-signature batches gets an invalid batch accepted with probability at least `1 - (1 - 2^-b)^q` (about `q/2^b` while `q ≪ 2^b`), against the upper bound `(q + 2)/2^b`. |
+| `batch_indexed_grind` | **For whole-batch derivation, the bound is tight up to the `ℓ` term while `q ≪ 2^b`**: from any valid signature, an explicit grinding attacker making `q` hash queries and outputting 2-signature batches gets an invalid batch accepted with probability at least `1 - (1 - 2^-b)^q` (about `q/2^b` while `q ≪ 2^b`), against the upper bound `(q + 2)/2^b`. |
 | `prEvent_bad_le` | A generic random-oracle bad-event bound with a potential. It allows one fresh answer to complete several bad candidates, as long as earlier queries paid for them. |
 
-The `q` term is inherent to deterministic coefficients, and `batch_indexed_grind` proves it: an attacker can grind batches offline, at one hash per try. With 128-bit coefficients, about `2^64` hash evaluations already give success probability about `2^-64`.
+The `q` term comes from the coefficients being deterministic: an attacker can grind batches offline, at one hash per try. `batch_indexed_grind` proves this for whole-batch derivation. The same attack should work against incremental derivation, but that is not proven here. With 128-bit coefficients, about `2^64` hash evaluations already give success probability about `2^-64`.
 
 Proof idea (incremental): cut the winning batch after its last invalid signature. That prefix still passes, and its equation involves only coefficients of its own prefixes. The last of those to be answered must hit the single value that solves the equation. One fresh answer can complete many cached extensions of the queried prefix, but each cached prefix is completed only once, so the total stays at one bad value per query. Whole-batch derivation is simpler: one fresh answer completes at most one batch.
 
@@ -166,7 +167,7 @@ The official test vectors run against the same definitions the theorems are abou
 | BIP340/341, MuSig2, DLC on secp256k1 | Standard axioms plus **one** `native_decide` computation: `n·G = 0` (`Secp256k1.n_smul_G`). |
 | Generic results (batch verification, numeric DLC decomposition) | Standard axioms only. They hold for any curve satisfying the interface. |
 | Batch verification in the random oracle model (`batch_indexed_sound`, `batch_incremental_sound`, `batch_indexed_grind`) | Standard axioms only; the secp256k1 versions add `n·G = 0`. |
-| BIP340 EUF-CMA (`secp256k1_euf_cma`) | Standard axioms plus `n·G = 0`. VCVio's forking lemma and Fiat-Shamir reduction are fully proven (no `sorry`, no extra axioms). |
+| BIP340 EUF-CMA (`secp256k1_euf_cma`, `secp256k1_euf_cma_dlog`) | Standard axioms plus `n·G = 0`. VCVio's forking lemma and Fiat-Shamir reduction are fully proven (no `sorry`, no extra axioms). |
 | BIP340 test vectors | Additionally use `native_decide` to run the vectors. |
 
 `native_decide` trusts Lean's compiler in addition to its kernel. Every other computation, including all primality certificates, is checked by the kernel.
