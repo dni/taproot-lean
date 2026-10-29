@@ -19,8 +19,10 @@ import Taproot.BIP340
   coefficients. `batchVerify_sound`: if some signature is invalid, then for any
   fixed values of the other coefficients at most one value of its coefficient
   makes the batch pass, so a random coefficient catches it except with
-  probability `1/n`. `batchVerify_sound_single` covers the coefficient fixed
-  to `1`.
+  probability `1/n`. `batchVerify_sound_bits`: the same with `b`-bit
+  coefficients (`2^b ≤ n`), so 128-bit coefficients catch it except with
+  probability `2^-128`. `batchVerify_sound_single` covers the coefficient fixed
+  to `1`. Coefficients derived from a hash are in `Taproot/BIP340Batch.lean`.
 
 Batch verification needs every point to satisfy `n·P = 0`
 (`Curve.PrimeOrder`, true for secp256k1 but not proven here).
@@ -239,6 +241,24 @@ theorem batchVerify_sound (hord : PrimeOrder n E) {u : ℕ} (ent : Fin u → Ent
   have := (valid_iff C challenge (ent j)).mpr ⟨(hlift j).1, (hlift j).2, h0⟩
   rw [hj] at this
   cases this
+
+/-- **Small coefficients suffice**: if signature `j` is invalid, then for any
+fixed values of the other coefficients at most one `b`-bit value of `aⱼ` lets
+the batch pass, as long as `2^b ≤ n`. A uniformly random `b`-bit coefficient
+therefore catches an invalid batch except with probability `2^-b`; BIP340
+batch verification can use 128-bit coefficients. -/
+theorem batchVerify_sound_bits (hord : PrimeOrder n E) {u : ℕ} (ent : Fin u → Entry n X M)
+    {j : Fin u} (hj : valid C challenge (ent j) = false) (a : Fin u → ZMod n) {b : ℕ}
+    (hb : 2 ^ b ≤ n) :
+    (Finset.univ.filter fun k : Fin (2 ^ b) =>
+      batchVerify C challenge ent (Function.update a j (k : ℕ)) = true).card ≤ 1 := by
+  refine Finset.card_le_one.mpr fun k hk k' hk' => ?_
+  simp only [Finset.mem_filter, Finset.mem_univ, true_and] at hk hk'
+  have h := batchVerify_sound C challenge hord ent hj
+    (fun i hi => by rw [Function.update_of_ne hi, Function.update_of_ne hi]) hk hk'
+  rw [Function.update_self, Function.update_self, ZMod.natCast_eq_natCast_iff',
+    Nat.mod_eq_of_lt (k.2.trans_le hb), Nat.mod_eq_of_lt (k'.2.trans_le hb)] at h
+  exact Fin.ext h
 
 /-- **A single invalid signature is always caught** when its coefficient is
 nonzero (e.g. BIP340's fixed `a₁ = 1`). -/

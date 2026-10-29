@@ -1,6 +1,7 @@
 import Taproot.MuSig2
 import Taproot.BIP340Props
 import Taproot.BIP340Security
+import Taproot.BIP340Batch
 import Taproot.DLCNumeric
 import Taproot.BIP350
 import Taproot.BIP340Vectors
@@ -217,6 +218,8 @@ end Taproot
 #print axioms Taproot.secp256k1_dlc_wrong_outcome
 #print axioms Taproot.DLC.Numeric.numeric_settle
 #print axioms Taproot.BIP340.batchVerify_sound
+#print axioms Taproot.BIP340.batchVerify_sound_bits
+#print axioms Taproot.BIP340Batch.batch_incremental_sound
 #print axioms Bech32.verify_createChecksum
 #print axioms Bech32.verifyChecksum_substitution
 #print axioms Bech32.bech32m_q_insertion_detected

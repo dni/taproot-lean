@@ -30,6 +30,7 @@ Unless stated otherwise, every result holds for **all** choices of the tagged ha
 | `sign_nonce_reuse` | So a signer whose nonce repeats across two messages leaks its key. |
 | `batchVerify_of_valid` | BIP340 batch verification accepts every batch of valid signatures, for every choice of coefficients. |
 | `batchVerify_sound` | If one signature is invalid, then once the other coefficients are fixed, at most one value of its coefficient lets the batch pass. A random coefficient catches it except with probability `1/n`. |
+| `batchVerify_sound_bits` | The same with `b`-bit coefficients (`2^b ≤ n`): at most one `b`-bit value of the coefficient lets the batch pass, so 128-bit coefficients catch an invalid signature except with probability `2^-128`. |
 | `batchVerify_sound_single` | A single invalid signature with a nonzero coefficient (e.g. BIP340's fixed `a₁ = 1`) is always caught. |
 
 ### BIP340 unforgeability (EUF-CMA) — `Taproot/BIP340Security.lean`
@@ -52,6 +53,17 @@ Modelling choices:
 - Nonces are uniform nonzero scalars. Real BIP340 derives them from a hash, which a random oracle makes uniform.
 - The hard problem is recovering the secret key of a random BIP340 public key (discrete log for a random even-y point).
 - The bound is the textbook Pointcheval-Stern one. It loses roughly a factor of `qH`, so it doesn't give 128-bit security for secp256k1 by itself; tighter bounds need stronger idealizations (e.g. the algebraic group model).
+
+### BIP340 batch verification with hash-derived coefficients — `Taproot/BIP340Batch.lean`
+
+In practice the batch coefficients aren't independent random values. They are derived deterministically from the batch, and the attacker picks the batch. This file models them as a random oracle, using the **incremental derivation** of libsecp256k1's batch API: the coefficient of signature `i ≥ 2` is a `b`-bit hash of the first `i` entries, so the attacker can choose later entries after seeing earlier coefficients.
+
+| Theorem | Statement |
+|---|---|
+| `batch_incremental_sound` | **Batch verification is sound in the random oracle model**: an attacker that makes at most `q` oracle queries and outputs batches of at most `ℓ` signatures gets a batch containing an invalid signature accepted with probability at most `(q + ℓ)/2^b` (`2^b ≤ n`). This holds for every choice of the challenge hash. |
+| `prEvent_bad_le` | A generic random-oracle bad-event bound with a potential. It allows one fresh answer to complete several bad candidates, as long as earlier queries paid for them. |
+
+Proof idea: cut the winning batch after its last invalid signature. That prefix still passes, and its equation involves only coefficients of its own prefixes. The last of those to be answered must hit the single value that solves the equation. One fresh answer can complete many cached extensions of the queried prefix, but each cached prefix is completed only once, so the total stays at one bad value per query.
 
 ### BIP341: Taproot — `Taproot/BIP341.lean`
 | Theorem | Statement |
@@ -164,6 +176,7 @@ Taproot/
   BIP340.lean         Schnorr signatures
   BIP340Props.lean    non-malleability, key extraction, batch verification
   BIP340Security.lean EUF-CMA unforgeability in the random oracle model (via VCVio)
+  BIP340Batch.lean    batch verification soundness with hash-derived coefficients (ROM)
   BIP341.lean         Taproot: key tweaking, key path, script trees
   DLC.lean            oracle attestations, Schnorr adaptor signatures, outcome binding,
                       script-path settlement
