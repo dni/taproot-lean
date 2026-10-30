@@ -18,4 +18,19 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: leanprover/lean-action@v1
+      # The API docs cover the whole import closure (Mathlib, VCVio, ...), and
+      # the runner's default 4 GB of swap is not enough for doc-gen4.
+      - name: Add swap for the docs build
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          sudo swapoff -a
+          sudo rm -f /mnt/swapfile
+          sudo fallocate -l 16G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+          free -h
+      # A docs failure should not mark the proofs as failing.
       - uses: leanprover-community/docgen-action@v1
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        continue-on-error: true
